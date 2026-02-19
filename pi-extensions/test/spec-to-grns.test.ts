@@ -107,6 +107,55 @@ test("parseSpecFile can produce an epic-only plan when no phases exist", async (
 	);
 });
 
+test("parseSpecFile falls back to filename when H1 headings are structural sections", async () => {
+	await withTempSpec(
+		"rxdb-e2ee.md",
+		[
+			"# Abstract",
+			"",
+			"# Rationale",
+			"",
+			"# Specification",
+			"",
+			"## Phase 1 — Foundation",
+			"- [ ] **Milestone 1.1: Data core boundary**",
+		].join("\n"),
+		(specPath) => {
+			const plan = __test.parseSpecFile(specPath);
+			assert.equal(plan.epicTitle, "Rxdb E2ee");
+			assert.equal(plan.phases.length, 1);
+			assert.equal(plan.phases[0].milestones.length, 1);
+			assert.equal(plan.phases[0].milestones[0].title, "Milestone 1.1: Data core boundary");
+		},
+	);
+});
+
+test("parseSpecFile ignores non-delivery phase headings and parses checklist milestones", async () => {
+	await withTempSpec(
+		"phase-filtering.md",
+		[
+			"# Abstract",
+			"",
+			"# Specification",
+			"",
+			"### Phase and milestone plan",
+			"#### Phase 1 — Ciphertext-only replication foundation",
+			"- [ ] **Milestone 1.1: Data core and schema boundary**",
+			"- [ ] **Milestone 1.2: Dumb-mailbox replication (push/pull)**",
+			"",
+			"### Phase 1 acceptance criteria (must pass in CI)",
+		].join("\n"),
+		(specPath) => {
+			const plan = __test.parseSpecFile(specPath);
+			assert.equal(plan.phases.length, 1);
+			assert.equal(plan.phases[0].title, "Phase 1 — Ciphertext-only replication foundation");
+			assert.equal(plan.phases[0].milestones.length, 2);
+			assert.equal(plan.phases[0].milestones[0].title, "Milestone 1.1: Data core and schema boundary");
+			assert.equal(plan.phases[0].milestones[1].title, "Milestone 1.2: Dumb-mailbox replication (push/pull)");
+		},
+	);
+});
+
 test("extractAcceptanceCriteria normalizes checklist items", () => {
 	const criteria = __test.extractAcceptanceCriteria([
 		"Some context",

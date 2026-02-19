@@ -879,6 +879,16 @@ function readRequiredPriority(value: unknown, checkpointPath: string): number {
 	throw new Error(`Invalid checkpoint field 'priority' in ${checkpointPath}`);
 }
 
+const STRUCTURAL_SPEC_HEADINGS = new Set([
+	"abstract",
+	"rationale",
+	"specification",
+	"further information",
+	"implementation plan",
+	"testing plan",
+	"documentation plan",
+]);
+
 function parseSpecFile(specPath: string): SpecPlan {
 	const raw = fs.readFileSync(specPath, "utf8");
 	const lines = raw.split(/\r?\n/);
@@ -893,7 +903,7 @@ function parseSpecFile(specPath: string): SpecPlan {
 	for (const line of lines) {
 		const heading = parseHeading(line);
 		if (heading) {
-			if (heading.level === 1 && !epicTitleSetFromHeading) {
+			if (heading.level === 1 && !epicTitleSetFromHeading && !isStructuralSpecHeading(heading.title)) {
 				epicTitle = heading.title;
 				epicTitleSetFromHeading = true;
 			}
@@ -916,6 +926,18 @@ function parseSpecFile(specPath: string): SpecPlan {
 				currentMilestone = { plan: milestonePlan, body: [] };
 				continue;
 			}
+		}
+
+		const milestoneFromBullet = parseMilestoneBullet(line);
+		if (milestoneFromBullet) {
+			if (!currentPhase) {
+				currentPhase = { title: "Phase: Unsorted", milestones: [] };
+				phases.push(currentPhase);
+			}
+			const milestonePlan: MilestonePlan = { title: milestoneFromBullet };
+			currentPhase.milestones.push(milestonePlan);
+			currentMilestone = { plan: milestonePlan, body: [] };
+			continue;
 		}
 
 		if (currentMilestone) {
@@ -950,12 +972,40 @@ function deriveFallbackEpicTitle(specPath: string): string {
 	return title || "Spec Epic";
 }
 
+function normalizeSpecHeading(title: string): string {
+	return title.toLowerCase().replace(/[`*_]/g, "").replace(/[:：]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function isStructuralSpecHeading(title: string): boolean {
+	return STRUCTURAL_SPEC_HEADINGS.has(normalizeSpecHeading(title));
+}
+
 function isPhaseHeading(title: string): boolean {
-	return /^(?:(?:\d+|[ivxlcdm]+)\s*[.)]\s*)?phase\b/i.test(title.trim());
+	const normalized = normalizeSpecHeading(title);
+	const withoutPrefix = normalized.replace(/^(?:\d+|[ivxlcdm]+)\s*[.)]\s*/, "");
+	if (!withoutPrefix.startsWith("phase")) return false;
+	if (withoutPrefix.startsWith("phase and milestone")) return false;
+	if (/^phase\s+\d+\s+acceptance criteria\b/i.test(withoutPrefix)) return false;
+	return true;
 }
 
 function isMilestoneHeading(title: string): boolean {
 	return /^(?:(?:\d+|[ivxlcdm]+)\s*[.)]\s*)?milestone\b/i.test(title.trim());
+}
+
+function parseMilestoneBullet(line: string): string | undefined {
+	const trimmed = line.trim();
+	if (!/^[-*]\s+/.test(trimmed)) return undefined;
+
+	let body = trimmed.replace(/^[-*]\s+/, "");
+	body = body.replace(/^\[[ xX]\]\s*/, "");
+	body = body.replace(/^(?:\*\*|__)\s*/, "").replace(/\s*(?:\*\*|__)\s*$/, "");
+	body = body.replace(/[`*_]/g, "").trim();
+	if (!body) return undefined;
+
+	if (/^m\d+\b/i.test(body)) return body;
+	if (/^milestone(?!s\b)\b/i.test(body)) return body;
+	return undefined;
 }
 
 function extractAcceptanceCriteria(body: string[]): string | undefined {
