@@ -1,907 +1,886 @@
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { constants } from "node:fs";
-import { access, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import * as path from "node:path";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import fs from "node:fs";
+import fsPromises from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
-const DEFAULT_SPECS_DIR = path.join(homedir(), "data", "specs");
+const STATUS_KEY = "specwriter";
+const DEFAULT_SPEC_DIR = path.join(os.homedir(), "data", "specs");
+const LARGE_SPEC_WORD_THRESHOLD = 260;
+const TITLE_TABLE_SCAN_LINES = 20;
+const MARKDOWN_EXTENSION_RE = /\.(md|markdown)$/i;
+const PROMPT_TEMPLATE_PATH = path.join("pi-prompts", "specwriter.md");
 
-const ACTIONS = ["create", "update", "review", "list"] as const;
-type Action = (typeof ACTIONS)[number];
-type Mode = "create" | "update";
+const REQUIRED_H1_SECTIONS = ["Abstract", "Rationale", "Specification"] as const;
+const OPTIONAL_H1_SECTIONS = ["Further Information"] as const;
+const ALLOWED_H1_SECTIONS = [...REQUIRED_H1_SECTIONS, ...OPTIONAL_H1_SECTIONS] as const;
 
-type RequiredSectionKey =
-	| "abstract"
-	| "rationale"
-	| "implementationOverview"
-	| "milestones"
-	| "dataModel"
-	| "proposedTests"
-	| "documentationImpact";
+const GUIDING_QUESTIONS = [
+	"Do I understand what needs to be done for the task?",
+	"Do I understand what is described in the spec?",
+	"Does the spec solve the task it is written for?",
+	"Is there an alternative solution that may be easier to implement?",
+	"Is the spec self-contradictory?",
+	"Is the spec self-consistent?",
+	"Is it clear what kind of tests need to be written?",
+	"Is it clear what kind of testing is required?",
+	"Is it clear what the implementation plan is and what are the deliverables of each phase of the implementation plan?",
+	"Do phases and milestones have clear outcomes defined?",
+] as const;
 
-interface SpecDraft {
+type ParsedArgs = {
+	specPath?: string;
+	help: boolean;
+};
+
+type Heading = {
+	line: number;
+	level: number;
 	title: string;
-	abstract: string;
-	rationale: string;
-	implementationOverview: string;
-	milestones: string;
-	dataModel: string;
-	proposedTests: string;
-	documentationImpact: string;
-	alternatives?: string;
-	references?: string;
+	normalized: string;
+};
+
+type WrongLevelSection = {
+	section: string;
+	line: number;
+	level: number;
+};
+
+type TitleSuggestionSource = "frontmatter" | "table" | "synthesized";
+
+type ParsedYamlFrontmatter = {
+	body: string;
+};
+
+type SpecDraftAnalysis = {
+	requiredMissing: string[];
+	requiredWrongLevel: WrongLevelSection[];
+	duplicateH1Sections: string[];
+	unexpectedH1: string[];
+	hasYamlFrontmatter: boolean;
+	hasFrontmatterTitle: boolean;
+	frontmatterTitle?: string;
+	tableTitleCandidate?: string;
+	suggestedTitle: string;
+	suggestedTitleSource: TitleSuggestionSource;
+	hasFurtherInformation: boolean;
+	hasSpecificationSection: boolean;
+	phaseCount: number;
+	milestoneCount: number;
+	milestonesWithoutPhase: number;
+	phasesWithoutMilestones: number;
+	unnumberedPhaseHeadings: number;
+	unnumberedMilestoneHeadings: number;
+	specWordCount: number;
+	shouldRecommendPhases: boolean;
+	hasImplementationSignal: boolean;
+	hasTestingSignal: boolean;
+	hasDocumentationSignal: boolean;
+	openQuestionCount: number;
+};
+
+export default function specwriterExtension(pi: ExtensionAPI) {
+	pi.registerCommand("specwriter", {
+		description: "Review and improve a markdown spec draft",
+		getArgumentCompletions: (prefix) => {
+			const trimmed = prefix.trim();
+			const option = "--help";
+
+			if (trimmed.startsWith("-")) {
+				return option.startsWith(trimmed) ? [{ value: option, label: option }] : null;
+			}
+
+			const specDir = resolveSpecDirectory(process.cwd());
+			const files = listMarkdownFiles(specDir).map((file) => ({
+				value: file,
+				label: `${file} (${specDir})`,
+			}));
+
+			const matches = files.filter((item) => item.value.startsWith(trimmed));
+			return matches.length > 0 ? matches.slice(0, 50) : null;
+		},
+		handler: async (rawArgs, ctx) => {
+			let parsed: ParsedArgs;
+			try {
+				parsed = parseArgs(rawArgs);
+			} catch (error) {
+				ctx.ui.notify(formatError(error), "error");
+				ctx.ui.notify("Run /specwriter --help for usage.", "warning");
+				return;
+			}
+
+			const specDir = resolveSpecDirectory(ctx.cwd);
+			if (parsed.help) {
+				publishInfo(pi, usageText(specDir), { usage: true, specDir });
+				return;
+			}
+
+			if (!parsed.specPath) {
+				ctx.ui.notify("Usage: /specwriter <spec-filename-or-path>", "warning");
+				return;
+			}
+
+			let specPath: string;
+			try {
+				specPath = resolveSpecPath(parsed.specPath, ctx.cwd, specDir);
+			} catch (error) {
+				ctx.ui.notify(formatError(error), "error");
+				return;
+			}
+
+			const displayPath = toDisplayPath(specPath, ctx.cwd);
+			ctx.ui.setStatus(STATUS_KEY, `Preparing ${displayPath}...`);
+
+			try {
+				const draft = await fsPromises.readFile(specPath, "utf8");
+				const analysis = analyzeSpec(draft, specPath);
+				const promptTemplate = await loadPromptTemplate(ctx.cwd);
+				const prompt = buildSpecwriterPrompt(specPath, analysis, promptTemplate);
+
+				if (ctx.isIdle()) {
+					pi.sendUserMessage(prompt);
+				} else {
+					pi.sendUserMessage(prompt, { deliverAs: "followUp" });
+					ctx.ui.notify("Queued /specwriter follow-up request.", "info");
+				}
+			} catch (error) {
+				ctx.ui.notify(formatError(error), "error");
+			} finally {
+				ctx.ui.setStatus(STATUS_KEY, undefined);
+			}
+		},
+	});
 }
 
-interface RequiredSectionConfig {
-	key: RequiredSectionKey;
-	title: string;
-	guidance: string;
-	defaultQuestion: string;
-	template?: string;
-	minLength: number;
+function usageText(specDir: string): string {
+	return [
+		"Usage:",
+		"  /specwriter <spec-filename-or-path>",
+		"",
+		"Behavior:",
+		"  - Reads a markdown spec draft and prepares a guided rewrite request.",
+		"  - Improves the spec in place via the agent.",
+		"  - Adds .md automatically when no extension is given.",
+		`  - Plain filenames resolve from ${specDir} first, then the current directory.`,
+		"",
+		"Environment:",
+		`  SPECWRITER_DIR overrides the default spec directory (default: ${DEFAULT_SPEC_DIR})`,
+	].join("\n");
 }
 
-interface SectionBlock {
-	content: string;
-	start: number;
-	end: number;
-}
+function parseArgs(rawArgs: string): ParsedArgs {
+	const tokens = splitShellArgs(rawArgs);
+	const out: ParsedArgs = {
+		specPath: undefined,
+		help: false,
+	};
 
-interface ReviewItem {
-	question: string;
-	status: "yes" | "needs-work" | "manual-check";
-	note: string;
-}
-
-const REQUIRED_SECTIONS: RequiredSectionConfig[] = [
-	{
-		key: "abstract",
-		title: "Abstract",
-		guidance: "Short overview of what this spec is about.",
-		defaultQuestion: "What is the core idea and scope of this spec?",
-		minLength: 24,
-	},
-	{
-		key: "rationale",
-		title: "Rationale",
-		guidance: "Problem statement and why this spec is needed.",
-		defaultQuestion: "Why is this change needed now, and what problem does it solve?",
-		minLength: 40,
-	},
-	{
-		key: "implementationOverview",
-		title: "Specification → Implementation Overview",
-		guidance: "High-level proposal and implementation strategy.",
-		defaultQuestion: "What is the proposed implementation approach?",
-		minLength: 40,
-	},
-	{
-		key: "milestones",
-		title: "Specification → Milestones",
-		guidance: "Use numbered phases with clear outcomes.",
-		defaultQuestion: "What implementation phases and outcomes are expected?",
-		template:
-			"1. **Phase 1 — xxx**\n   - Outcome: xxx\n   - Notes: xxx\n\n2. **Phase 2 — xxx**\n   - Outcome: xxx\n   - Notes: xxx",
-		minLength: 30,
-	},
-	{
-		key: "dataModel",
-		title: "Specification → Data Model",
-		guidance: "Describe schema/data shape/storage impact.",
-		defaultQuestion: "What data model changes are required?",
-		minLength: 20,
-	},
-	{
-		key: "proposedTests",
-		title: "Specification → Proposed Tests",
-		guidance: "Describe tests to write and expected validation.",
-		defaultQuestion: "What tests prove this implementation works?",
-		minLength: 24,
-	},
-	{
-		key: "documentationImpact",
-		title: "Specification → Documentation Impact",
-		guidance: "What docs/readmes/changelogs must be updated?",
-		defaultQuestion: "Which documentation changes are needed?",
-		minLength: 20,
-	},
-];
-
-function normalizeAction(value: string | undefined): Action | undefined {
-	if (!value) return undefined;
-	const lower = value.trim().toLowerCase();
-	if ((ACTIONS as readonly string[]).includes(lower)) return lower as Action;
-	if (lower === "new") return "create";
-	return undefined;
-}
-
-function parseArgs(args: string): { action?: Action; rawTarget?: string } {
-	const trimmed = args.trim();
-	if (!trimmed) return {};
-	const parts = trimmed.split(/\s+/);
-	const action = normalizeAction(parts[0]);
-	if (!action) return { rawTarget: trimmed };
-	const rawTarget = parts.slice(1).join(" ").trim();
-	return { action, rawTarget: rawTarget || undefined };
-}
-
-function expandHomePath(value: string): string {
-	if (value === "~") return homedir();
-	if (value.startsWith("~/")) return path.join(homedir(), value.slice(2));
-	return value;
-}
-
-function getSpecsDir(): string {
-	const customDir = process.env.SPECWRITER_DIR?.trim();
-	return expandHomePath(customDir && customDir.length > 0 ? customDir : DEFAULT_SPECS_DIR);
-}
-
-async function ensureSpecsDir(): Promise<string> {
-	const specsDir = getSpecsDir();
-	await mkdir(specsDir, { recursive: true });
-	return specsDir;
-}
-
-async function fileExists(filePath: string): Promise<boolean> {
-	try {
-		await access(filePath, constants.F_OK);
-		return true;
-	} catch {
-		return false;
+	for (const token of tokens) {
+		switch (token) {
+			case "--help":
+			case "-h":
+				out.help = true;
+				break;
+			default:
+				if (token.startsWith("--")) {
+					throw new Error(`unknown option: ${token}`);
+				}
+				if (out.specPath) {
+					throw new Error("only one spec filename/path is supported");
+				}
+				out.specPath = token;
+		}
 	}
+
+	return out;
 }
 
-function slugify(value: string): string {
-	const slug = value
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(0, 64);
-	return slug || "spec";
-}
-
-async function allocateSpecPath(specsDir: string, title: string): Promise<string> {
-	const date = new Date().toISOString().slice(0, 10);
-	const base = `${date}-${slugify(title)}`;
-	let candidate = path.join(specsDir, `${base}.md`);
-	let index = 2;
-	while (await fileExists(candidate)) {
-		candidate = path.join(specsDir, `${base}-${index}.md`);
-		index++;
+function splitShellArgs(input: string): string[] {
+	const out: string[] = [];
+	const re = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+	let match: RegExpExecArray | null;
+	while ((match = re.exec(input)) !== null) {
+		const token = match[1] ?? match[2] ?? match[3] ?? "";
+		if (token !== "") out.push(token.replace(/\\(["'\\ ])/g, "$1"));
 	}
-	return candidate;
+	return out;
 }
 
-async function listSpecFiles(specsDir: string): Promise<Array<{ name: string; fullPath: string; mtimeMs: number }>> {
-	let entries: Awaited<ReturnType<typeof readdir>>;
+function resolveSpecDirectory(cwd: string): string {
+	const configured = process.env.SPECWRITER_DIR?.trim();
+	if (!configured) return DEFAULT_SPEC_DIR;
+	return toAbsolutePath(configured, cwd);
+}
+
+function listMarkdownFiles(dir: string): string[] {
 	try {
-		entries = await readdir(specsDir, { withFileTypes: true });
+		if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
+		return fs
+			.readdirSync(dir, { withFileTypes: true })
+			.filter((entry) => entry.isFile() && MARKDOWN_EXTENSION_RE.test(entry.name))
+			.map((entry) => entry.name)
+			.sort((a, b) => a.localeCompare(b));
 	} catch {
 		return [];
 	}
-
-	const files = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".md"));
-	const withStats = await Promise.all(
-		files.map(async (entry) => {
-			const fullPath = path.join(specsDir, entry.name);
-			const details = await stat(fullPath);
-			return {
-				name: entry.name,
-				fullPath,
-				mtimeMs: details.mtimeMs,
-			};
-		}),
-	);
-
-	return withStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
 }
 
-async function resolveSpecPath(
-	ctx: ExtensionCommandContext,
-	specsDir: string,
-	rawTarget: string | undefined,
-	purpose: string,
-): Promise<string | undefined> {
-	if (rawTarget && rawTarget.trim().length > 0) {
-		let candidate = expandHomePath(rawTarget.trim());
-		if (!path.isAbsolute(candidate)) {
-			candidate = path.join(specsDir, candidate);
+function resolveSpecPath(inputPath: string, cwd: string, specDir: string): string {
+	const normalizedInput = normalizeRequestedSpecPath(inputPath);
+	const looksLikePath = isPathLike(normalizedInput);
+	const candidates: string[] = [];
+
+	if (looksLikePath) {
+		candidates.push(toAbsolutePath(normalizedInput, cwd));
+	} else {
+		candidates.push(path.join(specDir, normalizedInput));
+		candidates.push(path.join(cwd, normalizedInput));
+	}
+
+	for (const candidate of dedupe(candidates)) {
+		if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+			if (!MARKDOWN_EXTENSION_RE.test(candidate)) {
+				throw new Error(`Spec file must be markdown (.md/.markdown): ${candidate}`);
+			}
+			return path.normalize(candidate);
 		}
-		const withMd = candidate.toLowerCase().endsWith(".md") ? candidate : `${candidate}.md`;
-		if (await fileExists(candidate)) return candidate;
-		if (await fileExists(withMd)) return withMd;
-		ctx.ui.notify(`Spec file not found: ${rawTarget}`, "error");
-		return undefined;
 	}
 
-	const specs = await listSpecFiles(specsDir);
-	if (specs.length === 0) {
-		ctx.ui.notify(`No specs found in ${specsDir}`, "warning");
-		return undefined;
-	}
-
-	const selected = await ctx.ui.select(`Select spec to ${purpose}`, specs.map((spec) => spec.name));
-	if (!selected) return undefined;
-	return path.join(specsDir, selected);
+	throw new Error(`Spec file not found: ${normalizedInput}`);
 }
 
-function containsXxx(value: string): boolean {
-	return /(^|\W)xxx(\W|$)/i.test(value);
-}
-
-function sectionStatus(value: string, minLength: number): "missing" | "has-xxx" | "short" | "good" {
-	const trimmed = value.trim();
-	if (!trimmed) return "missing";
-	if (containsXxx(trimmed)) return "has-xxx";
-	if (trimmed.length < minLength) return "short";
-	return "good";
-}
-
-function ensureSectionContent(value: string, defaultQuestion: string): string {
-	const trimmed = value.trim();
+function normalizeRequestedSpecPath(inputPath: string): string {
+	const trimmed = inputPath.trim();
 	if (!trimmed) {
-		return `xxx\n- Question: ${defaultQuestion}`;
+		throw new Error("spec filename/path is required");
 	}
-	if (containsXxx(trimmed) && !/question\s*:/i.test(trimmed)) {
-		return `${trimmed}\n- Question: ${defaultQuestion}`;
+
+	const ext = path.extname(trimmed);
+	if (!ext) return `${trimmed}.md`;
+	if (!MARKDOWN_EXTENSION_RE.test(trimmed)) {
+		throw new Error("specwriter only supports markdown files (.md or .markdown)");
 	}
 	return trimmed;
 }
 
-function appendOpenQuestion(value: string, question: string): string {
-	const trimmedQuestion = question.trim();
-	if (!trimmedQuestion) return value;
-	return `${value}\n\nxxx\n- Question: ${trimmedQuestion}`;
+function isPathLike(value: string): boolean {
+	return (
+		value.includes("/") ||
+		value.includes("\\") ||
+		value.startsWith(".") ||
+		value.startsWith("~") ||
+		path.isAbsolute(value)
+	);
 }
 
-async function askTitle(ctx: ExtensionCommandContext, prefill = ""): Promise<string | undefined> {
-	let current = prefill;
-	while (true) {
-		const input = await ctx.ui.input("Spec title", current || "Short descriptive title");
-		if (input === undefined) return undefined;
-		const trimmed = input.trim();
-		if (trimmed.length > 0) return trimmed;
-		ctx.ui.notify("Title is required.", "warning");
-		current = "";
+function toAbsolutePath(inputPath: string, cwd: string): string {
+	const withHome = inputPath.startsWith("~")
+		? path.join(os.homedir(), inputPath.slice(1).replace(/^[/\\]/, ""))
+		: inputPath;
+	return path.isAbsolute(withHome) ? path.normalize(withHome) : path.resolve(cwd, withHome);
+}
+
+function toDisplayPath(target: string, cwd: string): string {
+	const relative = path.relative(cwd, target);
+	if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+		return relative;
 	}
+	return target;
 }
 
-async function editRequiredSection(
-	ctx: ExtensionCommandContext,
-	section: RequiredSectionConfig,
-	prefill: string,
-): Promise<string | undefined> {
-	let current = prefill.trim() || section.template || "";
+function analyzeSpec(markdown: string, specPath?: string): SpecDraftAnalysis {
+	const headings = parseHeadings(markdown);
+	const headingMap = new Map<string, Heading[]>();
+	for (const heading of headings) {
+		const list = headingMap.get(heading.normalized) ?? [];
+		list.push(heading);
+		headingMap.set(heading.normalized, list);
+	}
 
-	while (true) {
-		const edited = await ctx.ui.editor(`${section.title}\n\n${section.guidance}`, current);
-		if (edited === undefined) return undefined;
+	const frontmatter = parseYamlFrontmatter(markdown);
+	const frontmatterTitle = frontmatter ? parseFrontmatterTitle(frontmatter.body) : undefined;
+	const tableTitleCandidate = extractTitleFromTopTable(markdown, TITLE_TABLE_SCAN_LINES);
+	const suggestedTitle = chooseSuggestedTitle(markdown, specPath, headings, frontmatterTitle, tableTitleCandidate);
+	const suggestedTitleSource: TitleSuggestionSource = frontmatterTitle
+		? "frontmatter"
+		: tableTitleCandidate
+			? "table"
+			: "synthesized";
 
-		const trimmed = edited.trim();
-		if (!trimmed) {
-			const usePlaceholder = await ctx.ui.confirm(
-				`${section.title} incomplete`,
-				"Mark this section as `xxx` and continue?",
-			);
-			if (!usePlaceholder) {
-				current = "";
+	const requiredMissing: string[] = [];
+	const requiredWrongLevel: WrongLevelSection[] = [];
+	const duplicateH1Sections: string[] = [];
+
+	for (const section of REQUIRED_H1_SECTIONS) {
+		const normalized = normalizeHeadingTitle(section);
+		const matches = headingMap.get(normalized) ?? [];
+		const h1Matches = matches.filter((heading) => heading.level === 1);
+
+		if (h1Matches.length === 0) {
+			if (matches.length > 0) {
+				requiredWrongLevel.push({
+					section,
+					line: matches[0].line,
+					level: matches[0].level,
+				});
+			} else {
+				requiredMissing.push(section);
+			}
+		}
+
+		if (h1Matches.length > 1) {
+			duplicateH1Sections.push(section);
+		}
+	}
+
+	const optionalNormalized = normalizeHeadingTitle(OPTIONAL_H1_SECTIONS[0]);
+	const optionalMatches = headingMap.get(optionalNormalized) ?? [];
+	const optionalH1Matches = optionalMatches.filter((heading) => heading.level === 1);
+	const hasFurtherInformation = optionalH1Matches.length > 0;
+	if (optionalH1Matches.length > 1) {
+		duplicateH1Sections.push(OPTIONAL_H1_SECTIONS[0]);
+	}
+
+	const allowedH1 = new Set(ALLOWED_H1_SECTIONS.map((section) => normalizeHeadingTitle(section)));
+	const unexpectedH1 = unique(
+		headings
+			.filter((heading) => heading.level === 1 && !allowedH1.has(heading.normalized))
+			.map((heading) => heading.title),
+	);
+
+	const lines = markdown.split(/\r?\n/);
+	const specificationRange = getSectionRange(headings, normalizeHeadingTitle("Specification"), lines.length);
+	const hasSpecificationSection = specificationRange !== undefined;
+
+	const specificationHeadings = specificationRange
+		? headings.filter(
+				(heading) =>
+					heading.line > specificationRange.startLine && heading.line < specificationRange.endExclusiveLine,
+			)
+		: [];
+
+	const specificationBody = specificationRange
+		? lines.slice(specificationRange.startLine, specificationRange.endExclusiveLine - 1).join("\n")
+		: "";
+	const specificationBodyLower = specificationBody.toLowerCase();
+
+	let phaseCount = 0;
+	let milestoneCount = 0;
+	let milestonesWithoutPhase = 0;
+	let unnumberedPhaseHeadings = 0;
+	let unnumberedMilestoneHeadings = 0;
+
+	const milestonesPerPhase: number[] = [];
+	let currentPhaseIndex = -1;
+
+	for (const heading of specificationHeadings) {
+		if (heading.level === 2) {
+			if (isPhaseHeading(heading.title)) {
+				phaseCount += 1;
+				milestonesPerPhase.push(0);
+				currentPhaseIndex = milestonesPerPhase.length - 1;
 				continue;
 			}
-			const followUp = await ctx.ui.input(`${section.title} follow-up question`, section.defaultQuestion);
-			if (followUp === undefined) return undefined;
-			return `xxx\n- Question: ${followUp.trim() || section.defaultQuestion}`;
-		}
-
-		let normalized = ensureSectionContent(trimmed, section.defaultQuestion);
-		const unresolved = await ctx.ui.input(
-			`${section.title} unresolved question (optional)`,
-			"Leave empty if this section is clear for now",
-		);
-		if (unresolved === undefined) return undefined;
-		normalized = appendOpenQuestion(normalized, unresolved);
-
-		const keep = await ctx.ui.confirm(`Use ${section.title}?`, "Keep this section text?");
-		if (keep) return normalized;
-		current = trimmed;
-	}
-}
-
-async function editOptionalSection(
-	ctx: ExtensionCommandContext,
-	title: string,
-	prefill: string,
-	defaultQuestion: string,
-): Promise<string | undefined> {
-	const edited = await ctx.ui.editor(title, prefill);
-	if (edited === undefined) return undefined;
-	const trimmed = edited.trim();
-	if (!trimmed) return "";
-	return ensureSectionContent(trimmed, defaultQuestion);
-}
-
-async function collectFurtherInfo(
-	ctx: ExtensionCommandContext,
-	seed: Partial<SpecDraft>,
-	mode: Mode,
-): Promise<{ alternatives?: string; references?: string } | undefined> {
-	let alternatives = (seed.alternatives || "").trim();
-	let references = (seed.references || "").trim();
-
-	const hasExisting = alternatives.length > 0 || references.length > 0;
-	const includeFurther =
-		mode === "create"
-			? await ctx.ui.confirm("Further Information", "Add optional Further Information section?")
-			: hasExisting
-				? await ctx.ui.confirm("Further Information", "Keep/edit existing Further Information section?")
-				: await ctx.ui.confirm("Further Information", "Add optional Further Information section?");
-
-	if (!includeFurther) {
-		return { alternatives: "", references: "" };
-	}
-
-	if (alternatives) {
-		const editExisting = mode === "create" ? true : await ctx.ui.confirm("Alternatives", "Edit existing Alternatives?");
-		if (editExisting) {
-			const next = await editOptionalSection(
-				ctx,
-				"Further Information → Alternatives",
-				alternatives,
-				"Which alternative approaches should be evaluated?",
-			);
-			if (next === undefined) return undefined;
-			alternatives = next;
-		}
-	} else {
-		const add = await ctx.ui.confirm("Alternatives", "Add Alternatives subsection?");
-		if (add) {
-			const next = await editOptionalSection(
-				ctx,
-				"Further Information → Alternatives",
-				"",
-				"Which alternative approaches should be evaluated?",
-			);
-			if (next === undefined) return undefined;
-			alternatives = next;
-		}
-	}
-
-	if (references) {
-		const editExisting = mode === "create" ? true : await ctx.ui.confirm("References", "Edit existing References?");
-		if (editExisting) {
-			const next = await editOptionalSection(
-				ctx,
-				"Further Information → References",
-				references,
-				"Which links or supporting docs should be added?",
-			);
-			if (next === undefined) return undefined;
-			references = next;
-		}
-	} else {
-		const add = await ctx.ui.confirm("References", "Add References subsection?");
-		if (add) {
-			const next = await editOptionalSection(
-				ctx,
-				"Further Information → References",
-				"- [Name](https://example.com)",
-				"Which links or supporting docs should be added?",
-			);
-			if (next === undefined) return undefined;
-			references = next;
-		}
-	}
-
-	return {
-		alternatives,
-		references,
-	};
-}
-
-async function collectSpecDraft(
-	ctx: ExtensionCommandContext,
-	seed: Partial<SpecDraft>,
-	mode: Mode,
-): Promise<SpecDraft | undefined> {
-	let title = (seed.title || "").trim();
-	if (mode === "create" || !title) {
-		title = (await askTitle(ctx, title)) || "";
-		if (!title) return undefined;
-	} else {
-		const changeTitle = await ctx.ui.confirm("Spec title", `Current title: ${title}\n\nChange title?`);
-		if (changeTitle) {
-			const updatedTitle = await askTitle(ctx, title);
-			if (!updatedTitle) return undefined;
-			title = updatedTitle;
-		}
-	}
-
-	const result: Partial<SpecDraft> = { title };
-
-	for (const section of REQUIRED_SECTIONS) {
-		const previous = String(seed[section.key] || "");
-		const status = sectionStatus(previous, section.minLength);
-		let shouldEdit = true;
-
-		if (mode === "update" && previous.trim().length > 0) {
-			if (status === "good") {
-				shouldEdit = await ctx.ui.confirm(section.title, "Section looks complete. Edit anyway?");
-			} else {
-				shouldEdit = await ctx.ui.confirm(
-					`${section.title} needs clarification`,
-					`Current status: ${status}. Clarify this section now?`,
-				);
+			if (isAnyPhaseHeading(heading.title)) {
+				unnumberedPhaseHeadings += 1;
 			}
-		}
-
-		if (!shouldEdit) {
-			result[section.key] = ensureSectionContent(previous, section.defaultQuestion);
+			currentPhaseIndex = -1;
 			continue;
 		}
 
-		const updated = await editRequiredSection(ctx, section, previous);
-		if (updated === undefined) return undefined;
-		result[section.key] = updated;
+		if (heading.level === 3) {
+			if (isMilestoneHeading(heading.title)) {
+				milestoneCount += 1;
+				if (currentPhaseIndex < 0) {
+					milestonesWithoutPhase += 1;
+				} else {
+					milestonesPerPhase[currentPhaseIndex] += 1;
+				}
+				continue;
+			}
+			if (isAnyMilestoneHeading(heading.title)) {
+				unnumberedMilestoneHeadings += 1;
+			}
+		}
 	}
 
-	const furtherInfo = await collectFurtherInfo(ctx, seed, mode);
-	if (furtherInfo === undefined) return undefined;
+	const phasesWithoutMilestones = milestonesPerPhase.filter((count) => count === 0).length;
+	const specWordCount = countWords(specificationBody);
+	const shouldRecommendPhases = hasSpecificationSection && phaseCount === 0 && specWordCount >= LARGE_SPEC_WORD_THRESHOLD;
 
-	result.alternatives = furtherInfo.alternatives?.trim();
-	result.references = furtherInfo.references?.trim();
-
-	return normalizeSpec(result as SpecDraft);
-}
-
-function normalizeSpec(spec: SpecDraft): SpecDraft {
-	const normalized: SpecDraft = {
-		title: spec.title.trim(),
-		abstract: ensureSectionContent(spec.abstract || "", REQUIRED_SECTIONS[0].defaultQuestion),
-		rationale: ensureSectionContent(spec.rationale || "", REQUIRED_SECTIONS[1].defaultQuestion),
-		implementationOverview: ensureSectionContent(
-			spec.implementationOverview || "",
-			REQUIRED_SECTIONS[2].defaultQuestion,
+	return {
+		requiredMissing,
+		requiredWrongLevel,
+		duplicateH1Sections: unique(duplicateH1Sections),
+		unexpectedH1,
+		hasYamlFrontmatter: frontmatter !== undefined,
+		hasFrontmatterTitle: Boolean(frontmatterTitle),
+		frontmatterTitle,
+		tableTitleCandidate,
+		suggestedTitle,
+		suggestedTitleSource,
+		hasFurtherInformation,
+		hasSpecificationSection,
+		phaseCount,
+		milestoneCount,
+		milestonesWithoutPhase,
+		phasesWithoutMilestones,
+		unnumberedPhaseHeadings,
+		unnumberedMilestoneHeadings,
+		specWordCount,
+		shouldRecommendPhases,
+		hasImplementationSignal: /\b(implement|implementation|build|develop|delivery|deliverable|architecture|rollout)\b/.test(
+			specificationBodyLower,
 		),
-		milestones: ensureSectionContent(spec.milestones || "", REQUIRED_SECTIONS[3].defaultQuestion),
-		dataModel: ensureSectionContent(spec.dataModel || "", REQUIRED_SECTIONS[4].defaultQuestion),
-		proposedTests: ensureSectionContent(spec.proposedTests || "", REQUIRED_SECTIONS[5].defaultQuestion),
-		documentationImpact: ensureSectionContent(
-			spec.documentationImpact || "",
-			REQUIRED_SECTIONS[6].defaultQuestion,
+		hasTestingSignal: /\b(test|tests|testing|qa|verification|validate|validation|ci)\b/.test(specificationBodyLower),
+		hasDocumentationSignal: /\b(doc|docs|documentation|readme|runbook|guide|guides)\b/.test(
+			specificationBodyLower,
 		),
-		alternatives: spec.alternatives?.trim() ? ensureSectionContent(spec.alternatives, "What alternatives should be considered?") : "",
-		references: spec.references?.trim() ? ensureSectionContent(spec.references, "What references should be added?") : "",
+		openQuestionCount: (markdown.match(/\bxxx\b/gi) ?? []).length,
 	};
-
-	if (!normalized.title) {
-		normalized.title = "Untitled Spec";
-	}
-
-	return normalized;
 }
 
-function buildSpecMarkdown(spec: SpecDraft): string {
-	const normalized = normalizeSpec(spec);
-	const lines: string[] = [
-		`# ${normalized.title}`,
-		"",
-		"## Abstract",
-		"",
-		normalized.abstract,
-		"",
-		"## Rationale",
-		"",
-		normalized.rationale,
-		"",
-		"## Specification",
-		"",
-		"### Implementation Overview",
-		"",
-		normalized.implementationOverview,
-		"",
-		"### Milestones",
-		"",
-		normalized.milestones,
-		"",
-		"### Data Model",
-		"",
-		normalized.dataModel,
-		"",
-		"### Proposed Tests",
-		"",
-		normalized.proposedTests,
-		"",
-		"### Documentation Impact",
-		"",
-		normalized.documentationImpact,
-	];
-
-	const hasAlternatives = Boolean(normalized.alternatives && normalized.alternatives.trim());
-	const hasReferences = Boolean(normalized.references && normalized.references.trim());
-
-	if (hasAlternatives || hasReferences) {
-		lines.push("", "## Further Information", "");
-		if (hasAlternatives) {
-			lines.push("### Alternatives", "", normalized.alternatives!.trim(), "");
-		}
-		if (hasReferences) {
-			lines.push("### References", "", normalized.references!.trim(), "");
-		}
-	}
-
-	return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+function parseYamlFrontmatter(markdown: string): ParsedYamlFrontmatter | undefined {
+	const lines = markdown.split(/\r?\n/);
+	if (lines[0]?.trim() !== "---") return undefined;
+	const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+	if (end === -1) return undefined;
+	return { body: lines.slice(1, end).join("\n") };
 }
 
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function findSectionBlock(
-	lines: string[],
-	level: number,
-	titles: string[],
-	start = 0,
-	end = lines.length,
-): SectionBlock | undefined {
-	for (let i = start; i < end; i++) {
-		const line = lines[i].trim();
-		const target = titles.some((title) => {
-			const pattern = new RegExp(`^${"#".repeat(level)}\\s+${escapeRegExp(title)}\\s*$`, "i");
-			return pattern.test(line);
-		});
-		if (!target) continue;
-
-		let j = i + 1;
-		while (j < end) {
-			const headingMatch = /^(#{1,6})\s+/.exec(lines[j].trim());
-			if (headingMatch && headingMatch[1].length <= level) break;
-			j++;
-		}
-		return {
-			content: lines.slice(i + 1, j).join("\n").trim(),
-			start: i + 1,
-			end: j,
-		};
+function parseFrontmatterTitle(frontmatterBody: string): string | undefined {
+	const lines = frontmatterBody.split(/\r?\n/);
+	for (const rawLine of lines) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith("#")) continue;
+		const match = /^title\s*:\s*(.+?)\s*$/i.exec(line);
+		if (!match) continue;
+		const rawValue = match[1].trim();
+		if (!rawValue || rawValue === "|" || rawValue === ">") return undefined;
+		const cleaned = sanitizeTitleCandidate(rawValue);
+		return cleaned || undefined;
 	}
 	return undefined;
 }
 
-function parseSpecMarkdown(markdown: string): Partial<SpecDraft> {
+function extractTitleFromTopTable(markdown: string, maxLines: number): string | undefined {
+	const lines = markdown.split(/\r?\n/).slice(0, maxLines);
+	for (const rawLine of lines) {
+		const line = rawLine.trim();
+		if (!line.startsWith("|")) continue;
+		const cells = parseMarkdownTableRow(line);
+		if (cells.length < 2) continue;
+		if (normalizeHeadingTitle(cells[0]) !== "title") continue;
+
+		for (let i = 1; i < cells.length; i++) {
+			const candidateCell = cells[i].trim();
+			if (!candidateCell || isMarkdownTableDividerCell(candidateCell)) continue;
+			const candidate = sanitizeTitleCandidate(candidateCell);
+			if (candidate) return candidate;
+		}
+	}
+	return undefined;
+}
+
+function parseMarkdownTableRow(line: string): string[] {
+	const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+	return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function isMarkdownTableDividerCell(value: string): boolean {
+	const normalized = value.replace(/\s+/g, "");
+	return /^:?-{3,}:?$/.test(normalized);
+}
+
+function chooseSuggestedTitle(
+	markdown: string,
+	specPath: string | undefined,
+	headings: Heading[],
+	frontmatterTitle: string | undefined,
+	tableTitleCandidate: string | undefined,
+): string {
+	if (frontmatterTitle) return frontmatterTitle;
+	if (tableTitleCandidate) return tableTitleCandidate;
+	return synthesizeSpecTitle(markdown, specPath, headings);
+}
+
+function synthesizeSpecTitle(markdown: string, specPath: string | undefined, headings: Heading[]): string {
+	const structuralHeadings = new Set(ALLOWED_H1_SECTIONS.map((section) => normalizeHeadingTitle(section)));
+	const nonStructuralH1 = headings.find(
+		(heading) => heading.level === 1 && !structuralHeadings.has(heading.normalized),
+	);
+	if (nonStructuralH1) {
+		const cleaned = sanitizeTitleCandidate(nonStructuralH1.title);
+		if (cleaned) return cleaned;
+	}
+
+	const titleLikeLine = findFirstTitleLikeLine(stripFrontmatter(markdown));
+	if (titleLikeLine) return titleLikeLine;
+
+	const pathTitle = synthesizeTitleFromPath(specPath);
+	if (pathTitle) return pathTitle;
+
+	return "Untitled Spec";
+}
+
+function findFirstTitleLikeLine(markdown: string): string | undefined {
 	const lines = markdown.split(/\r?\n/);
-	const titleMatch = /^#\s+(.+)$/m.exec(markdown);
-	const title = titleMatch?.[1]?.trim() || "";
+	for (const rawLine of lines) {
+		const line = rawLine.trim();
+		if (!line) continue;
+		if (line === "---" || line === "...") continue;
+		if (line.startsWith("#")) continue;
+		if (line.startsWith("|")) continue;
+		if (/^[-*+]\s+/.test(line)) continue;
+		if (/^\d+[.)]\s+/.test(line)) continue;
+		if (/^```/.test(line)) continue;
 
-	const abstract = findSectionBlock(lines, 2, ["Abstract"])?.content || "";
-	const rationale = findSectionBlock(lines, 2, ["Rationale"])?.content || "";
+		const cleaned = sanitizeTitleCandidate(line.replace(/[.!?:;]+$/, "").trim());
+		if (!cleaned) continue;
+		return truncateTitle(cleaned);
+	}
+	return undefined;
+}
 
-	const specification = findSectionBlock(lines, 2, ["Specification"]);
-	const specStart = specification?.start ?? 0;
-	const specEnd = specification?.end ?? lines.length;
+function synthesizeTitleFromPath(specPath?: string): string | undefined {
+	if (!specPath) return undefined;
+	const stem = path.basename(specPath, path.extname(specPath)).trim();
+	if (!stem) return undefined;
 
-	const implementationOverview =
-		findSectionBlock(lines, 3, ["Implementation Overview", "Overview"], specStart, specEnd)?.content || "";
-	const milestones = findSectionBlock(lines, 3, ["Milestones", "Implementation Phases"], specStart, specEnd)?.content || "";
-	const dataModel = findSectionBlock(lines, 3, ["Data Model"], specStart, specEnd)?.content || "";
-	const proposedTests = findSectionBlock(lines, 3, ["Proposed Tests", "Tests"], specStart, specEnd)?.content || "";
-	const documentationImpact =
-		findSectionBlock(lines, 3, ["Documentation Impact"], specStart, specEnd)?.content || "";
+	const words = stem
+		.split(/[\s._-]+/)
+		.filter(Boolean)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1));
+	if (words.length === 0) return undefined;
+	return sanitizeTitleCandidate(words.join(" "));
+}
 
-	const furtherInfo = findSectionBlock(lines, 2, ["Further Information"]);
-	const alternatives = furtherInfo
-		? findSectionBlock(lines, 3, ["Alternatives"], furtherInfo.start, furtherInfo.end)?.content || ""
-		: "";
-	const references = furtherInfo
-		? findSectionBlock(lines, 3, ["References"], furtherInfo.start, furtherInfo.end)?.content || ""
-		: "";
+function sanitizeTitleCandidate(value: string): string {
+	let out = value.trim();
+	if (!out) return "";
 
+	out = stripWrappingQuotes(out);
+	out = out.replace(/\[(.+?)\]\((.+?)\)/g, "$1");
+	out = out.replace(/[`*_]/g, "");
+	out = out.replace(/\s+/g, " ").trim();
+	return out;
+}
+
+function stripWrappingQuotes(value: string): string {
+	if (value.length < 2) return value;
+	const startsWithDouble = value.startsWith('"') && value.endsWith('"');
+	const startsWithSingle = value.startsWith("'") && value.endsWith("'");
+	if (!startsWithDouble && !startsWithSingle) return value;
+	return value.slice(1, -1).trim();
+}
+
+function truncateTitle(value: string, maxLength = 80): string {
+	if (value.length <= maxLength) return value;
+	const truncated = value.slice(0, maxLength).trimEnd();
+	const lastSpace = truncated.lastIndexOf(" ");
+	if (lastSpace > 20) {
+		return truncated.slice(0, lastSpace).replace(/[\s:;,.!?-]+$/, "").trim();
+	}
+	return truncated.replace(/[\s:;,.!?-]+$/, "").trim();
+}
+
+function parseHeadings(markdown: string): Heading[] {
+	const out: Heading[] = [];
+	const lines = markdown.split(/\r?\n/);
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i].trim();
+		const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line);
+		if (!match) continue;
+
+		const title = match[2].trim();
+		if (!title) continue;
+
+		out.push({
+			line: i + 1,
+			level: match[1].length,
+			title,
+			normalized: normalizeHeadingTitle(title),
+		});
+	}
+
+	return out;
+}
+
+function normalizeHeadingTitle(title: string): string {
+	return title
+		.toLowerCase()
+		.replace(/[`*_]/g, "")
+		.replace(/[:：]/g, "")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function getSectionRange(
+	headings: Heading[],
+	normalizedSectionTitle: string,
+	totalLines: number,
+): { startLine: number; endExclusiveLine: number } | undefined {
+	const section = headings.find(
+		(heading) => heading.level === 1 && heading.normalized === normalizedSectionTitle,
+	);
+	if (!section) return undefined;
+
+	const nextH1 = headings.find((heading) => heading.level === 1 && heading.line > section.line);
 	return {
-		title,
-		abstract,
-		rationale,
-		implementationOverview,
-		milestones,
-		dataModel,
-		proposedTests,
-		documentationImpact,
-		alternatives,
-		references,
+		startLine: section.line,
+		endExclusiveLine: nextH1 ? nextH1.line : totalLines + 1,
 	};
 }
 
-function countMatches(value: string, expression: RegExp): number {
-	const matches = value.match(expression);
+function isPhaseHeading(title: string): boolean {
+	return /^phase\s+(?:\d+|[ivxlcdm]+)(?:[.:)\-–—\s]|$)/i.test(title.trim());
+}
+
+function isAnyPhaseHeading(title: string): boolean {
+	return /^phase\b/i.test(title.trim());
+}
+
+function isMilestoneHeading(title: string): boolean {
+	return /^milestone\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?:[.:)\-–—\s]|$)/i.test(title.trim());
+}
+
+function isAnyMilestoneHeading(title: string): boolean {
+	return /^milestone\b/i.test(title.trim());
+}
+
+function countWords(text: string): number {
+	const matches = text.match(/\S+/g);
 	return matches ? matches.length : 0;
 }
 
-function hasDefinedMilestoneOutcomes(value: string): boolean {
-	const hasNumberedItems = /^\s*\d+\.\s+/m.test(value);
-	const hasOutcomeLines = /^\s*[-*]\s+Outcome\s*:/im.test(value);
-	return hasNumberedItems && hasOutcomeLines;
+function formatYamlTitleValue(value: string): string {
+	return JSON.stringify(value);
 }
 
-function computeReview(spec: SpecDraft, markdown: string): { unresolvedMarkers: number; review: ReviewItem[] } {
-	const unresolvedMarkers = countMatches(markdown, /(^|\W)xxx(\W|$)/gi);
-	const purposeClear = !containsXxx(spec.abstract) && !containsXxx(spec.rationale) && spec.abstract.length >= 24;
-	const milestonesClear = hasDefinedMilestoneOutcomes(spec.milestones) && !containsXxx(spec.milestones);
-	const implementationClear = !containsXxx(spec.implementationOverview) && spec.implementationOverview.length >= 40;
-	const testsClear = !containsXxx(spec.proposedTests) && spec.proposedTests.length >= 24;
-	const alternativesPresent = Boolean(spec.alternatives && spec.alternatives.trim());
-	const requiredComplete = REQUIRED_SECTIONS.every((section) => {
-		const value = String(spec[section.key] || "");
-		return sectionStatus(value, section.minLength) !== "missing";
-	});
-
-	const review: ReviewItem[] = [
-		{
-			question: "Is the purpose of the spec clear?",
-			status: purposeClear ? "yes" : "needs-work",
-			note: purposeClear
-				? "Abstract + Rationale look specific enough."
-				: "Abstract or Rationale is missing/placeholder-heavy.",
-		},
-		{
-			question: "Does the spec contain clear milestones with a defined outcome?",
-			status: milestonesClear ? "yes" : "needs-work",
-			note: milestonesClear
-				? "Milestones include numbered phases and outcome lines."
-				: "Add numbered phases and explicit `Outcome:` lines.",
-		},
-		{
-			question: "Do I understand what needs to be done for the task?",
-			status: implementationClear && milestonesClear ? "yes" : "needs-work",
-			note:
-				implementationClear && milestonesClear
-					? "Implementation overview + milestones give actionable direction."
-					: "Clarify implementation overview and milestone outcomes.",
-		},
-		{
-			question: "Do I understand what is described in the spec?",
-			status: requiredComplete && unresolvedMarkers === 0 ? "yes" : "needs-work",
-			note:
-				requiredComplete && unresolvedMarkers === 0
-					? "Required sections are present and currently resolved."
-					: "Some required sections are weak or still marked with `xxx`.",
-		},
-		{
-			question: "Does the spec solve the task it is written for?",
-			status: implementationClear && !containsXxx(spec.rationale) ? "yes" : "needs-work",
-			note:
-				implementationClear && !containsXxx(spec.rationale)
-					? "Rationale and proposal align reasonably well."
-					: "Need stronger rationale/proposal alignment.",
-		},
-		{
-			question: "Is there an alternative solution that may be easier to implement?",
-			status: alternativesPresent ? "yes" : "needs-work",
-			note: alternativesPresent
-				? "Alternatives section exists."
-				: "No alternatives documented yet (optional but recommended).",
-		},
-		{
-			question: "Is the spec self-contradictory?",
-			status: "manual-check",
-			note: "Requires human review; automated checks are limited.",
-		},
-		{
-			question: "Is the spec self-consistent?",
-			status: "manual-check",
-			note: "Requires human review across all sections.",
-		},
-		{
-			question: "Is it clear what kind of tests need to be written?",
-			status: testsClear ? "yes" : "needs-work",
-			note: testsClear ? "Proposed tests section is populated." : "Clarify test scope and expected outcomes.",
-		},
-	];
-
-	return { unresolvedMarkers, review };
+function describeTitleSuggestionSource(source: TitleSuggestionSource): string {
+	switch (source) {
+		case "frontmatter":
+			return "using the existing frontmatter title";
+		case "table":
+			return `derived from a \`| Title | ...\` row in the first ${TITLE_TABLE_SCAN_LINES} lines`;
+		default:
+			return "synthesized from the draft content/path";
+	}
 }
 
-function buildReviewMarkdown(specPath: string, unresolvedMarkers: number, reviewItems: ReviewItem[]): string {
-	const lines = [`Specwriter review for \`${specPath}\``, "", `Unresolved \`xxx\` markers: **${unresolvedMarkers}**`, ""];
+function buildPreflightNotes(analysis: SpecDraftAnalysis): string[] {
+	const notes: string[] = [];
 
-	for (const item of reviewItems) {
-		const prefix = item.status === "yes" ? "✅" : item.status === "needs-work" ? "⚠️" : "🧭";
-		lines.push(`- ${prefix} ${item.question}`);
-		lines.push(`  - ${item.note}`);
+	if (!analysis.hasYamlFrontmatter) {
+		notes.push(
+			`No YAML frontmatter detected at the top of the file. Add frontmatter with \`title: ${formatYamlTitleValue(analysis.suggestedTitle)}\` (${describeTitleSuggestionSource(analysis.suggestedTitleSource)}).`,
+		);
+	} else if (!analysis.hasFrontmatterTitle) {
+		notes.push(
+			`YAML frontmatter exists but is missing \`title:\`. Add \`title: ${formatYamlTitleValue(analysis.suggestedTitle)}\` (${describeTitleSuggestionSource(analysis.suggestedTitleSource)}).`,
+		);
 	}
 
-	return lines.join("\n");
+	if (analysis.requiredMissing.length > 0) {
+		notes.push(`Missing required H1 sections: ${analysis.requiredMissing.join(", ")}.`);
+	}
+
+	if (analysis.requiredWrongLevel.length > 0) {
+		const details = analysis.requiredWrongLevel
+			.map((entry) => `${entry.section} is H${entry.level} on line ${entry.line}`)
+			.join("; ");
+		notes.push(`Required sections must be H1. Found: ${details}.`);
+	}
+
+	if (analysis.duplicateH1Sections.length > 0) {
+		notes.push(`Duplicate H1 sections detected: ${analysis.duplicateH1Sections.join(", ")}.`);
+	}
+
+	if (analysis.unexpectedH1.length > 0) {
+		notes.push(`Unexpected H1 headings detected: ${analysis.unexpectedH1.join(", ")}.`);
+	}
+
+	if (!analysis.hasSpecificationSection) {
+		notes.push("No `# Specification` section detected.");
+	} else {
+		notes.push(
+			`Specification body length: ~${analysis.specWordCount} words, ${analysis.phaseCount} numbered phase(s), ${analysis.milestoneCount} numbered milestone(s).`,
+		);
+	}
+
+	if (analysis.unnumberedPhaseHeadings > 0) {
+		notes.push(`Found ${analysis.unnumberedPhaseHeadings} unnumbered phase heading(s).`);
+	}
+
+	if (analysis.unnumberedMilestoneHeadings > 0) {
+		notes.push(`Found ${analysis.unnumberedMilestoneHeadings} unnumbered milestone heading(s).`);
+	}
+
+	if (analysis.milestonesWithoutPhase > 0) {
+		notes.push(`Found ${analysis.milestonesWithoutPhase} milestone heading(s) without a numbered parent phase.`);
+	}
+
+	if (analysis.phasesWithoutMilestones > 0) {
+		notes.push(`Found ${analysis.phasesWithoutMilestones} phase(s) without numbered milestones.`);
+	}
+
+	if (analysis.shouldRecommendPhases) {
+		notes.push(
+			"Specification is large and has no numbered phases. Consider splitting into phases + milestones.",
+		);
+	}
+
+	if (!analysis.hasImplementationSignal) {
+		notes.push("Specification may be missing explicit implementation planning details.");
+	}
+
+	if (!analysis.hasTestingSignal) {
+		notes.push("Specification may be missing explicit testing strategy details.");
+	}
+
+	if (!analysis.hasDocumentationSignal) {
+		notes.push("Specification may be missing explicit documentation plan details.");
+	}
+
+	if (analysis.openQuestionCount === 0) {
+		notes.push("No existing `xxx` open-question markers detected.");
+	}
+
+	if (!analysis.hasFurtherInformation) {
+		notes.push("Optional `# Further Information` section is not present.");
+	}
+
+	return notes;
 }
 
-async function maybePolishMarkdown(
-	ctx: ExtensionCommandContext,
-	markdown: string,
-): Promise<string | undefined> {
-	const shouldPolish = await ctx.ui.confirm("Final spec draft", "Open full markdown for a final manual pass before saving?");
-	if (!shouldPolish) return markdown;
-	const edited = await ctx.ui.editor("Spec Markdown", markdown);
-	if (edited === undefined) return undefined;
-	const trimmed = edited.trim();
-	if (!trimmed) return markdown;
-	return trimmed + "\n";
+async function loadPromptTemplate(cwd: string): Promise<string | undefined> {
+	const templatePath = path.join(cwd, PROMPT_TEMPLATE_PATH);
+	try {
+		const raw = await fsPromises.readFile(templatePath, "utf8");
+		const stripped = stripFrontmatter(raw).trim();
+		return stripped.length > 0 ? stripped : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
-async function publishReview(pi: ExtensionAPI, specPath: string, markdown: string): Promise<void> {
-	const parsed = normalizeSpec(parseSpecMarkdown(markdown) as SpecDraft);
-	const { unresolvedMarkers, review } = computeReview(parsed, markdown);
+function stripFrontmatter(text: string): string {
+	const lines = text.split(/\r?\n/);
+	if (lines[0]?.trim() !== "---") return text;
+	const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+	if (end === -1) return text;
+	return lines.slice(end + 1).join("\n");
+}
+
+function renderTemplate(template: string, values: Record<string, string>): string {
+	let output = template;
+	for (const [key, value] of Object.entries(values)) {
+		output = output.replaceAll(`{{${key}}}`, value);
+	}
+	return output;
+}
+
+function buildSpecwriterPrompt(
+	specPath: string,
+	analysis: SpecDraftAnalysis,
+	template?: string,
+): string {
+	const notes = buildPreflightNotes(analysis);
+	const notesBlock =
+		notes.length > 0
+			? notes.map((note) => `- ${note}`).join("\n")
+			: "- No structural issues detected by preflight checks.";
+	const guidingQuestionsBlock = GUIDING_QUESTIONS.map((question) => `- ${question}`).join("\n");
+
+	if (template?.trim()) {
+		return renderTemplate(template, {
+			SPEC_PATH: specPath,
+			GUIDING_QUESTIONS: guidingQuestionsBlock,
+			PREFLIGHT_NOTES: notesBlock,
+		}).trim();
+	}
+
+	return [
+		`Please act as SpecWriter and improve the markdown spec draft at \`${specPath}\`.`,
+		"",
+		"Workflow:",
+		`1. Read \`${specPath}\`.`,
+		"2. Improve it in place via edit/write tools.",
+		"3. Keep the result in Markdown.",
+		"",
+		"Required document structure:",
+		"- Start the file with YAML frontmatter and include a `title:` field.",
+		"- If a `| Title | ...` table row exists within the first 20 lines, use it as the title candidate.",
+		"- Otherwise synthesize a concise, descriptive title.",
+		"- Use H1 headings for the primary sections:",
+		"  - `# Abstract` (overview)",
+		"  - `# Rationale` (problem statement and why this spec exists)",
+		"  - `# Specification` (implementation, testing, and documentation plans)",
+		"- Optional H1 section: `# Further Information`.",
+		"- For larger specs, split `# Specification` into numbered phases and milestones:",
+		"  - `## Phase 1: ...`",
+		"  - `### Milestone 1.1: ...`",
+		"- Ensure every phase and milestone has clear outcomes/deliverables.",
+		"",
+		"Guiding questions:",
+		guidingQuestionsBlock,
+		"",
+		"Iteration rule:",
+		"- If later phases or milestones are underspecified, add explicit open questions marked with `xxx`.",
+		"- Use a clear format such as `- xxx: clarify ...`.",
+		"",
+		"Preflight observations from the extension:",
+		notesBlock,
+		"",
+		"After editing, reply with:",
+		"- A short summary of what you changed",
+		"- Remaining `xxx` questions that still require decisions",
+	].join("\n");
+}
+
+function dedupe(values: string[]): string[] {
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const value of values) {
+		if (seen.has(value)) continue;
+		seen.add(value);
+		out.push(value);
+	}
+	return out;
+}
+
+function unique(values: string[]): string[] {
+	return dedupe(values);
+}
+
+function publishInfo(pi: ExtensionAPI, content: string, details: Record<string, unknown>): void {
 	pi.sendMessage({
-		customType: "specwriter-review",
-		content: buildReviewMarkdown(specPath, unresolvedMarkers, review),
+		customType: "specwriter",
+		content,
+		details,
 		display: true,
-		details: {
-			specPath,
-			unresolvedMarkers,
-			review,
-		},
 	});
 }
 
-async function createSpec(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	specsDir: string,
-	initialTitle: string | undefined,
-): Promise<void> {
-	const seed: Partial<SpecDraft> = {
-		title: initialTitle || "",
-		milestones: REQUIRED_SECTIONS.find((s) => s.key === "milestones")?.template,
-	};
-
-	const draft = await collectSpecDraft(ctx, seed, "create");
-	if (!draft) {
-		ctx.ui.notify("Specwriter cancelled.", "info");
-		return;
-	}
-
-	let markdown = buildSpecMarkdown(draft);
-	const polished = await maybePolishMarkdown(ctx, markdown);
-	if (polished === undefined) {
-		ctx.ui.notify("Specwriter cancelled.", "info");
-		return;
-	}
-	markdown = polished;
-
-	const specPath = await allocateSpecPath(specsDir, draft.title);
-	await writeFile(specPath, markdown, "utf8");
-	ctx.ui.notify(`Saved spec: ${specPath}`, "info");
-	await publishReview(pi, specPath, markdown);
+function formatError(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	return String(error);
 }
 
-async function updateSpec(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	specsDir: string,
-	rawTarget: string | undefined,
-): Promise<void> {
-	const specPath = await resolveSpecPath(ctx, specsDir, rawTarget, "update");
-	if (!specPath) return;
-
-	const currentMarkdown = await readFile(specPath, "utf8");
-	const parsed = parseSpecMarkdown(currentMarkdown);
-	if (!parsed.title) {
-		parsed.title = path.basename(specPath, path.extname(specPath));
-	}
-
-	const draft = await collectSpecDraft(ctx, parsed, "update");
-	if (!draft) {
-		ctx.ui.notify("Specwriter cancelled.", "info");
-		return;
-	}
-
-	let markdown = buildSpecMarkdown(draft);
-	const polished = await maybePolishMarkdown(ctx, markdown);
-	if (polished === undefined) {
-		ctx.ui.notify("Specwriter cancelled.", "info");
-		return;
-	}
-	markdown = polished;
-
-	await writeFile(specPath, markdown, "utf8");
-	ctx.ui.notify(`Updated spec: ${specPath}`, "info");
-	await publishReview(pi, specPath, markdown);
-}
-
-async function reviewSpec(
-	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-	specsDir: string,
-	rawTarget: string | undefined,
-): Promise<void> {
-	const specPath = await resolveSpecPath(ctx, specsDir, rawTarget, "review");
-	if (!specPath) return;
-
-	const markdown = await readFile(specPath, "utf8");
-	await publishReview(pi, specPath, markdown);
-
-	const clarify = await ctx.ui.confirm("Review complete", "Run guided update to clarify this spec now?");
-	if (clarify) {
-		await updateSpec(pi, ctx, specsDir, specPath);
-	}
-}
-
-async function listSpecs(pi: ExtensionAPI, ctx: ExtensionCommandContext, specsDir: string): Promise<void> {
-	const specs = await listSpecFiles(specsDir);
-	if (specs.length === 0) {
-		ctx.ui.notify(`No specs found in ${specsDir}`, "info");
-		return;
-	}
-
-	const lines = specs.map((spec) => `- ${spec.name}`);
-	pi.sendMessage({
-		customType: "specwriter-list",
-		content: `Specs in \`${specsDir}\`:\n\n${lines.join("\n")}`,
-		display: true,
-		details: { specsDir, files: specs.map((spec) => spec.name) },
-	});
-
-	const selected = await ctx.ui.select("Review a spec now?", ["(skip)", ...specs.map((spec) => spec.name)]);
-	if (!selected || selected === "(skip)") return;
-	await reviewSpec(pi, ctx, specsDir, selected);
-}
-
-function actionCompletions(prefix: string) {
-	const value = prefix.trim().toLowerCase();
-	if (value.includes(" ")) return null;
-	const items = ACTIONS.filter((action) => action.startsWith(value)).map((action) => ({
-		value: action,
-		label: action,
-	}));
-	return items.length > 0 ? items : null;
-}
-
-async function runSpecwriter(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): Promise<void> {
-	if (!ctx.hasUI) {
-		ctx.ui.notify("specwriter requires interactive mode.", "error");
-		return;
-	}
-
-	const specsDir = await ensureSpecsDir();
-	const parsed = parseArgs(args);
-	let action = parsed.action;
-
-	if (!action) {
-		const selected = await ctx.ui.select("Specwriter", ACTIONS.map((entry) => entry));
-		if (!selected) return;
-		action = normalizeAction(selected);
-	}
-
-	if (!action) return;
-
-	switch (action) {
-		case "create":
-			await createSpec(pi, ctx, specsDir, parsed.rawTarget);
-			break;
-		case "update":
-			await updateSpec(pi, ctx, specsDir, parsed.rawTarget);
-			break;
-		case "review":
-			await reviewSpec(pi, ctx, specsDir, parsed.rawTarget);
-			break;
-		case "list":
-			await listSpecs(pi, ctx, specsDir);
-			break;
-	}
-}
-
-export default function specwriter(pi: ExtensionAPI) {
-	const handler = async (args: string, ctx: ExtensionCommandContext) => {
-		try {
-			await runSpecwriter(pi, args, ctx);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			ctx.ui.notify(`specwriter failed: ${message}`, "error");
-		}
-	};
-
-	pi.registerCommand("specwriter", {
-		description: "Interactive spec drafting assistant (create/update/review)",
-		getArgumentCompletions: actionCompletions,
-		handler,
-	});
-
-	pi.registerCommand("spec", {
-		description: "Alias for /specwriter",
-		getArgumentCompletions: actionCompletions,
-		handler,
-	});
-}
+export const __test = {
+	parseArgs,
+	splitShellArgs,
+	resolveSpecPath,
+	normalizeRequestedSpecPath,
+	resolveSpecDirectory,
+	loadPromptTemplate,
+	stripFrontmatter,
+	renderTemplate,
+	analyzeSpec,
+	buildPreflightNotes,
+	buildSpecwriterPrompt,
+	normalizeHeadingTitle,
+	isPhaseHeading,
+	isMilestoneHeading,
+};
