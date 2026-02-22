@@ -24,8 +24,8 @@ const GUIDING_QUESTIONS = [
 	"Is the spec self-consistent?",
 	"Is it clear what kind of tests need to be written?",
 	"Is it clear what kind of testing is required?",
-	"Is it clear what the implementation plan is and what are the deliverables of each phase of the implementation plan?",
-	"Do phases and milestones have clear outcomes defined?",
+	"Is it clear what the implementation plan is and what are the deliverables?",
+	"Do phases, milestones, and steps have clear outcomes defined?",
 ] as const;
 
 type ParsedArgs = {
@@ -67,12 +67,15 @@ type SpecDraftAnalysis = {
 	hasSpecificationSection: boolean;
 	phaseCount: number;
 	milestoneCount: number;
+	stepCount: number;
 	milestonesWithoutPhase: number;
 	phasesWithoutMilestones: number;
 	unnumberedPhaseHeadings: number;
 	unnumberedMilestoneHeadings: number;
+	unnumberedStepHeadings: number;
 	specWordCount: number;
 	shouldRecommendPhases: boolean;
+	shouldRecommendSteps: boolean;
 	hasImplementationSignal: boolean;
 	hasTestingSignal: boolean;
 	hasDocumentationSignal: boolean;
@@ -366,9 +369,11 @@ function analyzeSpec(markdown: string, specPath?: string): SpecDraftAnalysis {
 
 	let phaseCount = 0;
 	let milestoneCount = 0;
+	let stepCount = 0;
 	let milestonesWithoutPhase = 0;
 	let unnumberedPhaseHeadings = 0;
 	let unnumberedMilestoneHeadings = 0;
+	let unnumberedStepHeadings = 0;
 
 	const milestonesPerPhase: number[] = [];
 	let currentPhaseIndex = -1;
@@ -381,8 +386,16 @@ function analyzeSpec(markdown: string, specPath?: string): SpecDraftAnalysis {
 				currentPhaseIndex = milestonesPerPhase.length - 1;
 				continue;
 			}
+			if (isStepHeading(heading.title)) {
+				stepCount += 1;
+				currentPhaseIndex = -1;
+				continue;
+			}
 			if (isAnyPhaseHeading(heading.title)) {
 				unnumberedPhaseHeadings += 1;
+			}
+			if (isAnyStepHeading(heading.title)) {
+				unnumberedStepHeadings += 1;
 			}
 			currentPhaseIndex = -1;
 			continue;
@@ -406,7 +419,13 @@ function analyzeSpec(markdown: string, specPath?: string): SpecDraftAnalysis {
 
 	const phasesWithoutMilestones = milestonesPerPhase.filter((count) => count === 0).length;
 	const specWordCount = countWords(specificationBody);
+	const hasNumberedDeliveryPlan = phaseCount > 0 || milestoneCount > 0 || stepCount > 0;
 	const shouldRecommendPhases = hasSpecificationSection && phaseCount === 0 && specWordCount >= LARGE_SPEC_WORD_THRESHOLD;
+	const shouldRecommendSteps =
+		hasSpecificationSection &&
+		!hasNumberedDeliveryPlan &&
+		specWordCount > 0 &&
+		specWordCount < LARGE_SPEC_WORD_THRESHOLD;
 
 	return {
 		requiredMissing,
@@ -423,12 +442,15 @@ function analyzeSpec(markdown: string, specPath?: string): SpecDraftAnalysis {
 		hasSpecificationSection,
 		phaseCount,
 		milestoneCount,
+		stepCount,
 		milestonesWithoutPhase,
 		phasesWithoutMilestones,
 		unnumberedPhaseHeadings,
 		unnumberedMilestoneHeadings,
+		unnumberedStepHeadings,
 		specWordCount,
 		shouldRecommendPhases,
+		shouldRecommendSteps,
 		hasImplementationSignal: /\b(implement|implementation|build|develop|delivery|deliverable|architecture|rollout)\b/.test(
 			specificationBodyLower,
 		),
@@ -641,6 +663,14 @@ function isAnyPhaseHeading(title: string): boolean {
 	return /^phase\b/i.test(title.trim());
 }
 
+function isStepHeading(title: string): boolean {
+	return /^step\s+(?:\d+|[ivxlcdm]+)(?:[.:)\-–—\s]|$)/i.test(title.trim());
+}
+
+function isAnyStepHeading(title: string): boolean {
+	return /^step\b/i.test(title.trim());
+}
+
 function isMilestoneHeading(title: string): boolean {
 	return /^milestone\s+(?:\d+(?:\.\d+)*|[ivxlcdm]+)(?:[.:)\-–—\s]|$)/i.test(title.trim());
 }
@@ -705,7 +735,7 @@ function buildPreflightNotes(analysis: SpecDraftAnalysis): string[] {
 		notes.push("No `# Specification` section detected.");
 	} else {
 		notes.push(
-			`Specification body length: ~${analysis.specWordCount} words, ${analysis.phaseCount} numbered phase(s), ${analysis.milestoneCount} numbered milestone(s).`,
+			`Specification body length: ~${analysis.specWordCount} words, ${analysis.phaseCount} numbered phase(s), ${analysis.milestoneCount} numbered milestone(s), ${analysis.stepCount} numbered step(s).`,
 		);
 	}
 
@@ -715,6 +745,10 @@ function buildPreflightNotes(analysis: SpecDraftAnalysis): string[] {
 
 	if (analysis.unnumberedMilestoneHeadings > 0) {
 		notes.push(`Found ${analysis.unnumberedMilestoneHeadings} unnumbered milestone heading(s).`);
+	}
+
+	if (analysis.unnumberedStepHeadings > 0) {
+		notes.push(`Found ${analysis.unnumberedStepHeadings} unnumbered step heading(s).`);
 	}
 
 	if (analysis.milestonesWithoutPhase > 0) {
@@ -729,6 +763,10 @@ function buildPreflightNotes(analysis: SpecDraftAnalysis): string[] {
 		notes.push(
 			"Specification is large and has no numbered phases. Consider splitting into phases + milestones.",
 		);
+	}
+
+	if (analysis.shouldRecommendSteps) {
+		notes.push("Specification is relatively small. Consider splitting the implementation plan into numbered steps.");
 	}
 
 	if (!analysis.hasImplementationSignal) {
@@ -821,13 +859,16 @@ function buildSpecwriterPrompt(
 		"- For larger specs, split `# Specification` into numbered phases and milestones:",
 		"  - `## Phase 1: ...`",
 		"  - `### Milestone 1.1: ...`",
-		"- Ensure every phase and milestone has clear outcomes/deliverables.",
+		"- For lighter/smaller specs, a numbered step sequence is also valid:",
+		"  - `## Step 1: ...`",
+		"  - `## Step 2: ...`",
+		"- Ensure every phase, milestone, and step has clear outcomes/deliverables.",
 		"",
 		"Guiding questions:",
 		guidingQuestionsBlock,
 		"",
 		"Iteration rule:",
-		"- If later phases or milestones are underspecified, add explicit open questions marked with `xxx`.",
+		"- If later phases, milestones, or steps are underspecified, add explicit open questions marked with `xxx`.",
 		"- Use a clear format such as `- xxx: clarify ...`.",
 		"",
 		"Preflight observations from the extension:",
@@ -882,5 +923,6 @@ export const __test = {
 	buildSpecwriterPrompt,
 	normalizeHeadingTitle,
 	isPhaseHeading,
+	isStepHeading,
 	isMilestoneHeading,
 };

@@ -20,13 +20,16 @@ Required document structure:
 - For larger specs, split `# Specification` into numbered phases and milestones:
   - `## Phase 1: ...`
   - `### Milestone 1.1: ...`
-- Ensure every phase and milestone has clear outcomes/deliverables.
+- For lighter/smaller specs, a numbered step sequence is also valid:
+  - `## Step 1: ...`
+  - `## Step 2: ...`
+- Ensure every phase, milestone, and step has clear outcomes/deliverables.
 
 Guiding questions:
 {{GUIDING_QUESTIONS}}
 
 Iteration rule:
-- If later phases or milestones are underspecified, add explicit open questions marked with `xxx`.
+- If later phases, milestones, or steps are underspecified, add explicit open questions marked with `xxx`.
 - Use a clear format such as `- xxx: clarify ...`.
 
 Preflight observations from the extension:

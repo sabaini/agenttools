@@ -122,11 +122,38 @@ test("analyzeSpec counts numbered phases and milestones", () => {
 	assert.equal(analysis.hasFurtherInformation, true);
 	assert.equal(analysis.phaseCount, 2);
 	assert.equal(analysis.milestoneCount, 3);
+	assert.equal(analysis.stepCount, 0);
 	assert.equal(analysis.milestonesWithoutPhase, 0);
 	assert.equal(analysis.phasesWithoutMilestones, 0);
 	assert.equal(analysis.hasImplementationSignal, true);
 	assert.equal(analysis.hasTestingSignal, true);
 	assert.equal(analysis.hasDocumentationSignal, true);
+});
+
+test("analyzeSpec counts numbered steps for lighter specs", () => {
+	const analysis = __test.analyzeSpec(
+		[
+			"# Abstract",
+			"Overview.",
+			"",
+			"# Rationale",
+			"Problem statement.",
+			"",
+			"# Specification",
+			"Implementation plan.",
+			"",
+			"## Step 1: Prepare migration",
+			"Define exact migration scripts and safety checks.",
+			"",
+			"## Step 2: Execute and validate",
+			"Run rollout and confirm expected outcomes.",
+		].join("\n"),
+	);
+
+	assert.equal(analysis.phaseCount, 0);
+	assert.equal(analysis.milestoneCount, 0);
+	assert.equal(analysis.stepCount, 2);
+	assert.equal(analysis.shouldRecommendSteps, false);
 });
 
 test("analyzeSpec recommends phases for large unphased specs", () => {
@@ -146,6 +173,27 @@ test("analyzeSpec recommends phases for large unphased specs", () => {
 
 	assert.equal(analysis.phaseCount, 0);
 	assert.equal(analysis.shouldRecommendPhases, true);
+	assert.equal(analysis.shouldRecommendSteps, false);
+});
+
+test("analyzeSpec recommends steps for smaller unstructured specs", () => {
+	const analysis = __test.analyzeSpec(
+		[
+			"# Abstract",
+			"Overview.",
+			"",
+			"# Rationale",
+			"Problem.",
+			"",
+			"# Specification",
+			"Implement the feature and validate behavior with focused testing.",
+		].join("\n"),
+	);
+
+	assert.equal(analysis.phaseCount, 0);
+	assert.equal(analysis.milestoneCount, 0);
+	assert.equal(analysis.stepCount, 0);
+	assert.equal(analysis.shouldRecommendSteps, true);
 });
 
 test("analyzeSpec keeps existing frontmatter title", () => {
@@ -271,6 +319,7 @@ test("buildSpecwriterPrompt renders template placeholders", () => {
 
 	assert.ok(prompt.includes("Path=/tmp/spec.md"));
 	assert.ok(prompt.includes("- Do I understand what needs to be done for the task?"));
+	assert.ok(prompt.includes("- Is it clear what the implementation plan is and what are the deliverables?"));
 	assert.ok(prompt.includes("Notes:"));
 	assert.equal(prompt.includes("{{SPEC_PATH}}"), false);
 });
@@ -289,6 +338,7 @@ test("buildSpecwriterPrompt default guidance requires yaml title frontmatter", (
 	const prompt = __test.buildSpecwriterPrompt("/tmp/disaster-recovery-spec.md", analysis);
 	assert.ok(prompt.includes("YAML frontmatter"));
 	assert.ok(prompt.includes("`| Title | ...`"));
+	assert.ok(prompt.includes("`## Step 1: ...`"));
 });
 
 test("loadPromptTemplate reads pi-prompts/specwriter.md", async () => {
