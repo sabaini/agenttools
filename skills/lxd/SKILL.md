@@ -1,6 +1,6 @@
 ---
 name: lxd
-description: Best-practice workflows for LXD containers and VMs: launch Ubuntu LTS instances (default ubuntu:24.04), mount host directories and storage volumes, and define reusable profiles and networks.
+description: "Workflows for LXD containers and VMs: launch Ubuntu instances, mount host directories and storage volumes, and define reusable profiles and networks."
 compatibility: Linux host with LXD/LXC CLI access (tested on LXD 5.x+).
 ---
 
