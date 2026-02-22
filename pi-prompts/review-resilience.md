@@ -14,6 +14,7 @@ Review the code for resilience and error handling.
 - Missing circuit breakers for external calls
 - Unhelpful panic/crash behavior
 - Recovery path gaps
+- Missing debug logging
 
 **In a charm, also check for:**
 - Hooks that raise unhandled exceptions instead of catching errors and setting BlockedStatus/WaitingStatus with an actionable message
@@ -24,3 +25,4 @@ Review the code for resilience and error handling.
 - What happens when external services fail?
 - Can the system recover from partial failures?
 - Are errors actionable for operators?
+- Is logging helpful in troubleshooting?
