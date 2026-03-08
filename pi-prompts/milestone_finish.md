@@ -1,47 +1,24 @@
 ---
-description: Finalize a reviewed milestone and mark completion state
+description: Reference notes for native /milestone_finish behavior
 ---
-You are executing `/milestone_finish` for milestone selector:
+Reference only: `/milestone_finish` is orchestrated by native extension code.
 
-`$1`
+Use the package-local planner workflow contract:
 
-## Required behavior
+- `agenttools/docs/planner-workflow.md`
 
-1. If `$1` is empty, hard-stop with:
-   - `Usage: /milestone_finish <milestone>`
-2. Read and follow `docs/planner-workflow.md` completely.
-3. Run all common validations for non-/planner commands.
-4. Resolve milestone by id/slug/directory name.
-5. Verify completion preconditions:
-   - all required tasks are `done` or `skipped`
-   - review phase completed
-   - no unresolved high/medium review issues in `review.md`
-   - no active `blocker.md`
-6. Enforce transition:
-   - status `in_progress -> done`
-   - phase `review -> finished`
+Native expectations:
 
-State updates:
+- verify review completion
+- verify no unresolved high/medium review findings remain
+- verify no active blocker remains
+- finalize state to `done` / `finished`
+- append final evidence and write `milestone-result.json`
 
-- `status: done`
-- `phase: finished`
-- set `completed_at`
-- set `updated_at`
-
-Append final summary to `execution.md` including:
-
-- tests added
-- docs updated
-- validations run
-- commits created (task + hardening + review)
-- remaining low-priority deferred issues
-
-## Required final response
-
-Return a concise completion summary with:
+Keep responses concise:
 
 1. milestone resolved
 2. final status + phase
-3. completed timestamp
-4. key evidence sources (`execution.md`, `review.md`)
-5. next recommended command (usually next milestone)
+3. completion timestamp
+4. evidence paths
+5. next command

@@ -2,10 +2,17 @@
   "name": "agenttools",
   "private": true,
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./pi-extensions/*.ts", "./pi-extensions/*/index.ts"],
-    "prompts": ["./pi-prompts/*.md"]
+    "extensions": [
+      "./pi-extensions/*.ts",
+      "./pi-extensions/*/index.ts"
+    ],
+    "prompts": [
+      "./pi-prompts/*.md"
+    ]
   },
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
@@ -15,5 +22,8 @@
   },
   "scripts": {
     "test": "node --test ./pi-extensions/test/*.test.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.8.2"
   }
 }

@@ -1,41 +1,22 @@
 ---
-description: Start a milestone on a dedicated feature branch with strict preflight validation
+description: Reference notes for native /milestone_start behavior
 ---
-You are executing `/milestone_start` for milestone selector:
+Reference only: `/milestone_start` is orchestrated by native extension code.
 
-`$1`
+Use the package-local planner workflow contract:
 
-## Required behavior
+- `agenttools/docs/planner-workflow.md`
 
-1. If `$1` is empty, hard-stop with:
-   - `Usage: /milestone_start <milestone>`
-2. Read and follow `docs/planner-workflow.md` completely.
-3. Run all **common validations for non-/planner commands** before doing anything else.
-4. Resolve milestone by id, slug, or milestone directory name.
-5. Enforce preconditions:
-   - current branch must equal `plan.yaml.repo.default_branch`
-   - working tree must have no staged or unstaged tracked changes (ignore untracked files)
-6. Create and switch to branch:
-   - `feat/<milestone-slug>`
-   - hard-stop if branch already exists
-7. Update milestone `state.yaml` exactly:
-   - `status: in_progress`
-   - `phase: started`
-   - `branch: feat/<milestone-slug>`
-   - set `started_at` and `updated_at` (ISO-8601 with timezone)
-   - reset checkpoint to `{ task_id: null, step: not_started }`
-8. Append a start entry to `execution.md` with timestamp, resolved milestone, created branch, and initial task snapshot.
+Native expectations:
 
-## Transition enforcement
+- enforce branch/working-tree preflight
+- create `feat/<milestone-slug>`
+- initialize milestone state and checkpoint
+- append start evidence to `execution.md`
 
-- Only allow `planned -> in_progress` here.
-- Any invalid transition must hard-stop as `plan_defect`.
+Keep responses concise:
 
-## Required final response
-
-Return a concise summary with:
-
-1. Milestone resolved (`id`, slug, path)
-2. Branch created and checked out
-3. Updated state file path
-4. Next recommended command (`/tasker <task-id>` or `/milestoner <milestone>`)
+1. milestone resolved
+2. branch created
+3. state path
+4. next recommended command

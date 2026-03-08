@@ -1,61 +1,29 @@
 ---
-description: Review milestone output, fix findings, rerun validation, and record review results
+description: Reference notes for native /milestone_review behavior
 ---
-You are executing `/milestone_review` for milestone selector:
+Reference only: `/milestone_review` is orchestrated by native extension code.
 
-`$1`
+Use the package-local planner workflow contract:
 
-## Required behavior
+- `agenttools/docs/planner-workflow.md`
 
-1. If `$1` is empty, hard-stop with:
-   - `Usage: /milestone_review <milestone>`
-2. Read and follow `docs/planner-workflow.md` completely.
-3. Run all common validations for non-/planner commands.
-4. Resolve milestone by id/slug/directory name.
-5. Enforce phase transition `hardening -> review`.
+Native expectations:
 
-Review flow:
+- require active deterministic review tooling via `prepare_review`
+- prepare deterministic review input with `prepare_review`
+- write milestone `review.md`
+- fix high and medium findings
+- rerun milestone validation with `planner_run_validation_profile`
+- treat canonical validation failures as blocking by default
+- treat exploratory validation failures as advisory by default unless explicitly escalated
+- use `planner_append_execution_section` for extra review evidence
+- use `planner_block_milestone` only for non-validation blockers
 
-1. prepare the review deterministically by calling `prepare_review` with:
-   - `scope: "branch"`
-   - `base: plan.yaml.repo.default_branch`
-   - `outputPath: <milestone-dir>/review.md`
-   - omit `reviewIds` to use all loaded review templates
-2. use the prepared review packet to perform the review and write milestone `review.md`
-3. fix all high and medium findings
-4. rerun relevant validation/tests
-5. create review-fix commit (prefer one):
-   - `<milestone-id>: review fixes`
+Keep responses concise:
 
-If `prepare_review` is unavailable:
-
-- perform a manual self-review
-- explicitly state this in `review.md`
-
-Write `review.md` with:
-
-- review method
-- findings summary
-- high/medium issues fixed
-- low issues deferred
-- validation rerun evidence
-- review-fix commit SHA (if any)
-
-On block/failure:
-
-- set milestone status `blocked`
-- set `blocked_at` if needed
-- archive old `blocker.md` if present
-- write new `blocker.md`
-- recommend `/resume_milestone <milestone>`
-
-## Required final response
-
-Return a concise summary with:
-
-1. review method used (`prepare_review` or manual)
+1. review method used
 2. findings fixed/deferred
 3. validation rerun result
-4. review commit SHA (if any)
-5. blocker details + path if blocked
-6. next recommended command
+4. review-fix commit SHA if any
+5. blocker details if blocked
+6. next command

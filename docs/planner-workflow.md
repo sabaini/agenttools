@@ -14,6 +14,8 @@ This document defines the deterministic workflow used by these commands:
 
 Use this as a strict contract. If a command cannot satisfy a hard rule, it must stop with a clear error.
 
+Prompt markdown files in `pi-prompts/` are reference/spec aids only. Native planner-workflow execution, state mutation, blocker handling, validation policy, and result emission must live in extension/runtime code.
+
 ---
 
 ## Core goals
@@ -176,6 +178,18 @@ Review findings, fixes, and remaining deferred items.
 - `done`
 - `skipped`
 
+### Task execution mode
+
+- `tdd`
+- `docs_only`
+- `pure_refactor`
+- `build_config`
+- `generated_update`
+
+`execution_mode` is optional in `spec.yaml.tasks[]`.
+If omitted, the task defaults to `tdd`.
+If a non-`tdd` mode is used, `execution_mode_reason` is required.
+
 ### Blocker types
 
 - `clarification`
@@ -200,6 +214,24 @@ Review findings, fixes, and remaining deferred items.
 ISO-8601 with timezone offset, e.g.:
 
 `2026-03-07T10:12:00+01:00`
+
+---
+
+## Validation execution policy
+
+Validation commands declared in `spec.yaml.validation.commands` must be treated as one of:
+
+- `origin: canonical`
+- `origin: exploratory`
+
+Policy:
+
+- canonical failures are blocking by default
+- exploratory failures are advisory by default
+- exploratory failures become blocking when the milestone acceptance criteria or milestone-touched code makes that validation class attributable/relevant
+- all validation outcomes must be recorded in `execution.md` and, when relevant, `review.md`
+
+This policy is intended to keep milestone execution deterministic without turning unrelated pre-existing repo debt into an automatic blocker.
 
 ---
 
@@ -274,6 +306,7 @@ Responsibilities:
 - inspect repo structure/conventions
 - infer language/tooling/testing/docs setup
 - detect repo identity and default branch
+- derive milestone-local validation profiles under `spec.yaml.validation`
 - decompose into milestones
 - create plan root + milestone directories
 - write static files (`README.md`, `plan.yaml`, `spec.yaml`, `state.yaml`, `milestone.md`, `execution.md`)
@@ -313,6 +346,25 @@ Initial `state.yaml` for each milestone:
 - checkpoint set to `{ task_id: null, step: not_started }`
 - per-task entries with `status: planned`, `commit: null`
 
+Each generated milestone `spec.yaml` must also include an explicit milestone-local validation block:
+
+- `validation.commands`
+- each command annotated with `kind` and `origin`
+- repo-declared validations should be `canonical`
+- guessed fallback validations should be `exploratory`
+
+Task contracts may also declare explicit non-default execution behavior:
+
+- default task flow is implicit `execution_mode: tdd`
+- tasks that are not appropriate for the default TDD loop must declare:
+  - `execution_mode`
+  - `execution_mode_reason`
+- supported non-default modes are:
+  - `docs_only`
+  - `pure_refactor`
+  - `build_config`
+  - `generated_update`
+
 ## `/milestone_start <milestone>`
 
 Preconditions:
@@ -350,16 +402,27 @@ Default flow (unless a documented exception applies):
 9. rerun tests until green
 10. checkpoint -> `tests_green_verified`
 11. run slightly broader validation
-12. mark task done
-13. checkpoint -> `done`
-14. commit task changes
+12. create the required task commit
+13. finalize task outcome natively (`done`, checkpoint -> `done`)
+
+Execution-mode policy:
+
+- default task flow is `tdd`
+- non-`tdd` tasks must be explicitly declared in `spec.yaml.tasks[]`
+- supported non-`tdd` modes are:
+  - `docs_only`
+  - `pure_refactor`
+  - `build_config`
+  - `generated_update`
+- non-`tdd` tasks must carry `execution_mode_reason`
+- runtime state/evidence must preserve the chosen mode and rationale
 
 TDD policy:
 
-- default red->green->refactor
-- exceptions: docs-only, pure refactor, build/config wiring, generated updates
-- record exception rationale in `execution.md`
+- `tdd` tasks follow default red->green->refactor
 - never claim red unless observed
+- do not force fake TDD checkpoints for explicit non-`tdd` tasks
+- for non-`tdd` tasks, completion is allowed only after checkpoint `implementation_started` (or later) and only when the explicit mode/rationale has been recorded
 
 Per-task commit policy (hard rule):
 
@@ -367,8 +430,14 @@ Per-task commit policy (hard rule):
 - message format: `<task-id>: <task title>`
 - if no changes are needed, use `--allow-empty` and explain why in commit body + `execution.md`
 - record commit SHA in state + execution log
+- task-completion tooling must verify that the provided commit SHA exists and is reachable from the current milestone branch
+- prefer `planner_finalize_task_outcome` to atomically append final task evidence and mark the task `done`
+- `planner_complete_task` should only be used once the task checkpoint has already reached `tests_green_verified` (or an equivalent documented exception flow has been recorded in evidence)
 
 Blocking behavior:
+
+- prefer `planner_finalize_task_outcome` to atomically append final task evidence and mark the task `blocked`
+- task-scoped state mutation tools must verify the milestone branch before mutating workflow files
 
 - on block, task -> `blocked`, milestone -> `blocked`
 - set `blocked_at` if unset
@@ -381,7 +450,7 @@ Blocking behavior:
 
 - set phase to `hardening`
 - verify all non-skipped tasks are done
-- run broader tests/lint/typecheck/build as applicable
+- run `spec.yaml.validation.commands` using the canonical vs exploratory policy above
 - update docs as needed
 - fix obvious inconsistencies
 - if hardening makes changes, commit `<milestone-id>: hardening`
@@ -391,13 +460,14 @@ Blocking behavior:
 ## `/milestone_review <milestone>`
 
 - set phase to `review`
-- call the shared `prepare_review` tool deterministically using branch scope against `plan.yaml.repo.default_branch`
+- require the shared `prepare_review` tool to be installed and active
+- call `prepare_review` deterministically using branch scope against `plan.yaml.repo.default_branch`
 - use the returned review packet to perform the review and write milestone `review.md`
 - fix high and medium findings
-- rerun validation
+- rerun `spec.yaml.validation.commands` using the canonical vs exploratory policy above
 - commit review fixes as `<milestone-id>: review fixes` (prefer one commit)
 - write `review.md` including method/findings/fixes/deferred/rerun evidence/commit SHA
-- if `prepare_review` is unavailable, do manual self-review and state this explicitly
+- if `prepare_review` is unavailable or inactive, stop with a clear error; do not silently fall back to manual self-review
 - on failure: block milestone and create blocker report
 
 ## `/milestone_finish <milestone>`
