@@ -58,7 +58,9 @@ The review extension also registers a shared `prepare_review` tool. `/review` us
 /milestoner m1
 ```
 
-Manual flow:
+`/milestoner` is the normal top-level execution path: it owns milestone progression from the first remaining task through hardening/review/finish unless the milestone blocks.
+
+Manual flow (exception path):
 
 ```text
 /milestone_start m1

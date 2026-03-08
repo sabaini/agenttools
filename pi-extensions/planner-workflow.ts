@@ -1812,7 +1812,9 @@ async function runMilestonerNative(
 
 	if (currentStatus === "planned" || currentPhase === "not_started") {
 		await enforceMilestoneStartPreconditions(pi, activePlan.repoRoot, activePlan.defaultBranch);
-		await runMilestoneStartNative(pi, ctx, activePlan, milestone, milestoneDir, milestone.id);
+		await runMilestoneStartNative(pi, ctx, activePlan, milestone, milestoneDir, milestone.id, {
+			invokedByMilestoner: true,
+		});
 		stateRecord = await loadMilestoneStateRecord(statePath);
 		state = await loadMilestoneStateData(statePath);
 	}
@@ -1834,6 +1836,8 @@ async function runMilestonerNative(
 			taskId: nextTask.taskId,
 			milestone,
 			milestoneDir,
+		}, {
+			invokedByMilestoner: true,
 		});
 		return;
 	}
@@ -1900,6 +1904,7 @@ async function runMilestoneStartNative(
 	milestone: PlanMilestone,
 	milestoneDir: string,
 	milestoneSelector: string,
+	options?: { invokedByMilestoner?: boolean },
 ): Promise<void> {
 	const branchName = resolveMilestoneBranchName(milestone);
 	const statePath = path.join(milestoneDir, "state.yaml");
@@ -1940,7 +1945,9 @@ async function runMilestoneStartNative(
 			`Started milestone ${milestone.id}${milestone.slug ? ` (${milestone.slug})` : ""}.`,
 			`Branch: ${branchName}`,
 			`State: ${statePath}`,
-			`Next: /tasker <task-id> or /milestoner ${milestone.id}`,
+			options?.invokedByMilestoner
+				? `Next: continuing under /milestoner ${milestone.id}`
+				: `Next: /tasker <task-id> or /milestoner ${milestone.id}`,
 		].join("\n"),
 		"info",
 	);
@@ -2170,6 +2177,7 @@ function buildNativeTaskerBrief(options: {
 	branchName: string;
 	checkpointStep: (typeof CHECKPOINT_STEPS)[number];
 	dependencyLines: string[];
+	invokedByMilestoner?: boolean;
 }): string {
 	const contractPath = path.join(PACKAGE_ROOT, "docs", "planner-workflow.md");
 	const milestoneGuidePath = path.join(options.milestoneDir, "milestone.md");
@@ -2178,7 +2186,9 @@ function buildNativeTaskerBrief(options: {
 	const executionPath = path.join(options.milestoneDir, "execution.md");
 
 	return [
-		`Continue the native /tasker workflow for task \`${options.taskId}\`.`,
+		options.invokedByMilestoner
+			? `Continue the native /milestoner workflow for milestone ${formatResolvedMilestone(options.milestone)}. Current task: \`${options.taskId}\`.`
+			: `Continue the native /tasker workflow for task \`${options.taskId}\`.`,
 		"",
 		"Read before acting:",
 		`- Workflow contract: \`${contractPath}\``,
@@ -2207,8 +2217,13 @@ function buildNativeTaskerBrief(options: {
 			executionModeReason: options.executionModeReason,
 		}),
 		"",
-		"Execute exactly this one task now.",
+		options.invokedByMilestoner
+			? "Execute the current task now as the next step of /milestoner-owned milestone execution."
+			: "Execute exactly this one task now.",
 		"Follow the contract for TDD, checkpoint progression, execution evidence, blocker handling, and the mandatory per-task commit.",
+		options.invokedByMilestoner
+			? "Do not redirect the user to run /tasker manually for routine progression; /milestoner owns the normal task-to-task flow unless the milestone blocks."
+			: undefined,
 		"Use native planner tools instead of manual workflow-file edits:",
 		"- `planner_task_checkpoint` whenever the checkpoint advances",
 		"- `planner_append_execution_section` for intermediate execution evidence sections",
@@ -2230,6 +2245,7 @@ async function runTaskerNative(
 	ctx: ExtensionCommandContext,
 	activePlan: ActivePlanContext,
 	resolvedTask: TaskResolution,
+	options?: { invokedByMilestoner?: boolean },
 ): Promise<void> {
 	const milestone = resolvedTask.milestone;
 	const milestoneDir = resolvedTask.milestoneDir;
@@ -2305,6 +2321,7 @@ async function runTaskerNative(
 			branchName: expectedBranch ?? asString(startResult.state.branch) ?? resolveMilestoneBranchName(milestone),
 			checkpointStep,
 			dependencyLines: dependencyStatusLines(taskSpec.dependsOn, state),
+			invokedByMilestoner: options?.invokedByMilestoner,
 		}),
 	);
 }

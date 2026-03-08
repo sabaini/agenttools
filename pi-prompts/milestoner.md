@@ -11,6 +11,8 @@ Native expectations:
 
 - deterministic milestone resolution
 - deterministic task ordering from `spec.yaml`
+- `/milestoner` owns normal milestone execution from the first remaining task through final completion
+- do not redirect the user to run `/tasker` explicitly for routine progression
 - immediate stop on blocked state
 - native progression through start, task execution, hardening, review, and finish
 - machine-readable `milestone-result.json` output

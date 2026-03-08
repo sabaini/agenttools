@@ -389,6 +389,8 @@ Behavior:
 
 Execute exactly one task.
 
+This is the manual/single-task entrypoint. Normal milestone-wide execution ownership stays with `/milestoner`.
+
 Default flow (unless a documented exception applies):
 
 1. inspect task contract + code context
@@ -489,18 +491,24 @@ Append final completion summary to `execution.md`.
 
 ## `/milestoner <milestone>`
 
-Thin orchestration flow:
+Top-level milestone orchestration flow:
 
 1. milestone start
 2. deterministic task ordering:
    - topological sort by task dependencies
    - tie-break by original order in `spec.yaml`
    - if cycle -> hard-stop `plan_defect`, recommend `/replanner <milestone>`
-3. execute tasks one-by-one (`/tasker` behavior)
+3. execute tasks from first remaining task through last remaining task using `/tasker` semantics as an internal implementation detail
 4. stop immediately on block
 5. hardening
 6. review
 7. finish
+
+User-facing contract:
+
+- `/milestoner` owns normal milestone execution from first task through final completion
+- it must not redirect the user to run `/tasker` explicitly for routine milestone progression
+- `/tasker` remains available for manual/recovery usage, but that is an exception flow, not the default `/milestoner` path
 
 On any block, stop and report:
 
@@ -650,7 +658,7 @@ Inspect the generated milestones, then run one end-to-end:
 /milestoner m1
 ```
 
-If you want to drive the milestone manually instead of using `/milestoner`:
+If you explicitly want to drive the milestone manually instead of using `/milestoner`:
 
 ```text
 /milestone_start m1

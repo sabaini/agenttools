@@ -1459,7 +1459,8 @@ test("milestoner starts a planned milestone and kicks off the first ordered task
 				(entry) =>
 					entry.level === "info" &&
 					entry.message.includes("Started milestone m1 (alpha).") &&
-					entry.message.includes("Branch: feat/alpha"),
+					entry.message.includes("Branch: feat/alpha") &&
+					entry.message.includes("Next: continuing under /milestoner m1"),
 			),
 			"expected milestone_start summary during native milestoner orchestration",
 		);
@@ -1471,7 +1472,8 @@ test("milestoner starts a planned milestone and kicks off the first ordered task
 			"expected milestoner to create the milestone branch natively",
 		);
 		assert.equal(sentMessages.length, 1);
-		assert.ok(sentMessages[0].includes("Continue the native /tasker workflow for task `m1-t1`."));
+		assert.ok(sentMessages[0].includes("Continue the native /milestoner workflow for milestone `m1` / `alpha`. Current task: `m1-t1`."));
+		assert.ok(sentMessages[0].includes("Do not redirect the user to run /tasker manually"));
 		assert.ok(!sentMessages[0].includes("m1-t2"), "expected topological ordering to pick the first ready task");
 
 		const state = await fs.readFile(path.join(milestoneDir, "state.yaml"), "utf8");

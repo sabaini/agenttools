@@ -10,6 +10,7 @@ Use the package-local planner workflow contract:
 Native expectations:
 
 - execute exactly one task
+- `/tasker` is the manual/recovery task entrypoint; normal milestone-wide progression should stay under `/milestoner`
 - follow the checkpointed TDD flow by default
 - if the task declares a non-default `execution_mode`, follow that explicit mode and preserve its rationale in state/evidence
 - use native tools for mutable workflow state:
