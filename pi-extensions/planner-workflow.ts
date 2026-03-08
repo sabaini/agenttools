@@ -25,6 +25,7 @@ interface CommandSpec {
 	resolveMilestone: boolean;
 	resolveTask: boolean;
 	requiresStartPreflight: boolean;
+	requiredActiveTools?: string[];
 }
 
 interface PlanRepoInfo {
@@ -58,10 +59,6 @@ interface ActivePlanContext {
 interface TaskResolution {
 	taskId: string;
 	milestone: PlanMilestone;
-	specPath: string;
-	statePath: string;
-	specTaskIds: Set<string>;
-	stateTaskIds: Set<string>;
 }
 
 interface CompletionPlanContext {
@@ -98,6 +95,7 @@ const COMMAND_SPECS: Record<PlannerCommandName, CommandSpec> = {
 		resolveMilestone: true,
 		resolveTask: false,
 		requiresStartPreflight: false,
+		requiredActiveTools: ["prepare_review"],
 	},
 	milestone_start: {
 		description: "Start a milestone branch with strict preflight checks",
@@ -138,6 +136,7 @@ const COMMAND_SPECS: Record<PlannerCommandName, CommandSpec> = {
 		resolveMilestone: true,
 		resolveTask: false,
 		requiresStartPreflight: false,
+		requiredActiveTools: ["prepare_review"],
 	},
 	milestone_finish: {
 		description: "Finalize milestone completion state",
@@ -221,13 +220,16 @@ async function runValidatedCommand(
 
 		if (spec.resolveTask && argument) {
 			const taskResolution = await resolveTaskInPlan(activePlan.plan, argument);
-			validateTaskAlignment(taskResolution);
 			canonicalArg = taskResolution.taskId;
 		}
 
 		if (spec.requiresStartPreflight) {
 			await enforceMilestoneStartPreconditions(pi, repoRoot, activePlan.defaultBranch);
 		}
+	}
+
+	if (spec.requiredActiveTools?.length) {
+		enforceRequiredActiveTools(pi, spec.requiredActiveTools, commandName);
 	}
 
 	const dispatchRawArgs = canonicalArg ?? "";
@@ -575,8 +577,8 @@ function parsePlanYaml(raw: string, planPath: string): PlanData {
 	};
 
 	for (const line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("#")) continue;
+		const trimmed = stripInlineComment(line).trim();
+		if (!trimmed) continue;
 
 		if (!line.startsWith(" ")) {
 			if (section === "milestones") flushMilestone();
@@ -677,7 +679,7 @@ function assignMilestoneField(milestone: Partial<PlanMilestone>, key: string, va
 }
 
 function parseYamlScalar(rawValue: string): string | undefined {
-	let value = rawValue.trim();
+	let value = stripInlineComment(rawValue).trim();
 	if (!value || value === "null" || value === "~") return undefined;
 
 	if (
@@ -855,10 +857,6 @@ async function resolveTaskInPlan(plan: PlanData, taskId: string): Promise<TaskRe
 			matches.push({
 				taskId: cleanTaskId,
 				milestone,
-				specPath,
-				statePath,
-				specTaskIds: specIds,
-				stateTaskIds: stateIds,
 			});
 		}
 	}
@@ -902,26 +900,60 @@ function parseTaskIdsFromYaml(raw: string): Set<string> {
 	const ids = new Set<string>();
 	let inTasks = false;
 	let tasksIndent = 0;
+	let taskEntryIndent: number | undefined;
+	let currentTaskFieldIndent: number | undefined;
 
 	for (const line of lines) {
-		const trimmed = line.trim();
+		const trimmed = stripInlineComment(line).trim();
 		if (!inTasks) {
-			if (/^tasks:\s*$/.test(trimmed)) {
+			if (trimmed === "tasks:") {
 				inTasks = true;
 				tasksIndent = countLeadingSpaces(line);
+				taskEntryIndent = undefined;
+				currentTaskFieldIndent = undefined;
 			}
 			continue;
 		}
 
+		if (!trimmed) continue;
+
 		const indent = countLeadingSpaces(line);
-		if (trimmed && indent <= tasksIndent) {
+		if (indent <= tasksIndent) {
 			inTasks = false;
+			taskEntryIndent = undefined;
+			currentTaskFieldIndent = undefined;
 			continue;
 		}
 
-		const entryId = parseTaskIdLine(trimmed);
-		if (entryId) {
-			ids.add(entryId);
+		const isListEntry = trimmed.startsWith("-");
+		if (taskEntryIndent === undefined) {
+			if (!isListEntry) continue;
+			taskEntryIndent = indent;
+			currentTaskFieldIndent = undefined;
+			const entryId = parseTaskIdLine(trimmed);
+			if (entryId) ids.add(entryId);
+			continue;
+		}
+
+		if (isListEntry && indent === taskEntryIndent) {
+			currentTaskFieldIndent = undefined;
+			const entryId = parseTaskIdLine(trimmed);
+			if (entryId) ids.add(entryId);
+			continue;
+		}
+
+		if (indent <= taskEntryIndent) {
+			currentTaskFieldIndent = undefined;
+			continue;
+		}
+
+		if (currentTaskFieldIndent === undefined) {
+			currentTaskFieldIndent = indent;
+		}
+
+		if (indent === currentTaskFieldIndent) {
+			const entryId = parseTaskIdLine(trimmed);
+			if (entryId) ids.add(entryId);
 		}
 	}
 
@@ -965,36 +997,6 @@ function countLeadingSpaces(line: string): number {
 	return count;
 }
 
-function validateTaskAlignment(resolution: TaskResolution): void {
-	if (!setEquals(resolution.specTaskIds, resolution.stateTaskIds)) {
-		throw new Error(
-			[
-				`Spec/state task id drift detected for milestone ${resolution.milestone.id}.`,
-				`Spec:  ${Array.from(resolution.specTaskIds).join(", ") || "(none)"}`,
-				`State: ${Array.from(resolution.stateTaskIds).join(", ") || "(none)"}`,
-				`This is a plan_defect. Run /replanner ${resolution.milestone.id}.`,
-			].join("\n"),
-		);
-	}
-
-	if (!resolution.specTaskIds.has(resolution.taskId) || !resolution.stateTaskIds.has(resolution.taskId)) {
-		throw new Error(
-			[
-				`Task '${resolution.taskId}' is not aligned between spec/state for milestone ${resolution.milestone.id}.`,
-				`This is a plan_defect. Run /replanner ${resolution.milestone.id}.`,
-			].join("\n"),
-		);
-	}
-}
-
-function setEquals(left: Set<string>, right: Set<string>): boolean {
-	if (left.size !== right.size) return false;
-	for (const value of left) {
-		if (!right.has(value)) return false;
-	}
-	return true;
-}
-
 async function enforceMilestoneStartPreconditions(
 	pi: ExtensionAPI,
 	repoRoot: string,
@@ -1015,13 +1017,54 @@ async function enforceMilestoneStartPreconditions(
 		);
 	}
 
-	const status = await pi.exec("git", ["-C", repoRoot, "status", "--porcelain"]);
+	const status = await pi.exec("git", [
+		"-C",
+		repoRoot,
+		"status",
+		"--porcelain",
+		"--untracked-files=no",
+	]);
 	if (status.code !== 0) {
 		throw new Error("Failed to check git working tree status.");
 	}
 	if (status.stdout.trim()) {
 		throw new Error(
-			"/milestone_start requires a clean working tree (no staged/unstaged/untracked files).",
+			"/milestone_start requires no staged or unstaged tracked changes (untracked files are ignored).",
+		);
+	}
+}
+
+function enforceRequiredActiveTools(
+	pi: ExtensionAPI,
+	requiredToolNames: string[],
+	commandName: PlannerCommandName,
+): void {
+	const allTools = typeof pi.getAllTools === "function" ? pi.getAllTools() : [];
+	const activeTools = typeof pi.getActiveTools === "function" ? pi.getActiveTools() : [];
+	const allToolNames = new Set(allTools.map((tool) => tool.name));
+	const activeToolNames = new Set(activeTools);
+
+	const missing = requiredToolNames.filter((name) => !allToolNames.has(name));
+	if (missing.length > 0) {
+		throw new Error(
+			[
+				`/${commandName} requires active review tooling before it can run.`,
+				`Missing tool(s): ${missing.join(", ")}`,
+				"Install or reload the agenttools pi package, then retry.",
+				"If the package is already installed, run /reload.",
+			].join("\n"),
+		);
+	}
+
+	const inactive = requiredToolNames.filter((name) => !activeToolNames.has(name));
+	if (inactive.length > 0) {
+		throw new Error(
+			[
+				`/${commandName} requires active review tooling before it can run.`,
+				`Inactive tool(s): ${inactive.join(", ")}`,
+				"Enable the tool in the current pi runtime and retry.",
+				"If you just installed or updated the package, run /reload.",
+			].join("\n"),
 		);
 	}
 }

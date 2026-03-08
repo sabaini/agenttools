@@ -14,7 +14,7 @@ You are executing `/milestone_start` for milestone selector:
 4. Resolve milestone by id, slug, or milestone directory name.
 5. Enforce preconditions:
    - current branch must equal `plan.yaml.repo.default_branch`
-   - working tree must be clean (no staged/unstaged/untracked changes)
+   - working tree must have no staged or unstaged tracked changes (ignore untracked files)
 6. Create and switch to branch:
    - `feat/<milestone-slug>`
    - hard-stop if branch already exists

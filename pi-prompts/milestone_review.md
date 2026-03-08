@@ -16,14 +16,18 @@ You are executing `/milestone_review` for milestone selector:
 
 Review flow:
 
-1. run `/review`
-2. parse findings
+1. prepare the review deterministically by calling `prepare_review` with:
+   - `scope: "branch"`
+   - `base: plan.yaml.repo.default_branch`
+   - `outputPath: <milestone-dir>/review.md`
+   - omit `reviewIds` to use all loaded review templates
+2. use the prepared review packet to perform the review and write milestone `review.md`
 3. fix all high and medium findings
 4. rerun relevant validation/tests
 5. create review-fix commit (prefer one):
    - `<milestone-id>: review fixes`
 
-If `/review` is unavailable:
+If `prepare_review` is unavailable:
 
 - perform a manual self-review
 - explicitly state this in `review.md`
@@ -49,7 +53,7 @@ On block/failure:
 
 Return a concise summary with:
 
-1. review method used (`/review` or manual)
+1. review method used (`prepare_review` or manual)
 2. findings fixed/deferred
 3. validation rerun result
 4. review commit SHA (if any)

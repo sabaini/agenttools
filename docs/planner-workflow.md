@@ -284,6 +284,13 @@ Clarification policy:
 - Ask only when ambiguity materially affects architecture/API/persistence/milestones/test strategy.
 - Otherwise proceed with explicit assumptions.
 
+Plan-name derivation:
+
+- take the first 50 characters of `<workdesc>`
+- if `<workdesc>` is longer, truncate before slug generation
+- slugify deterministically to lowercase `[a-z0-9-]`
+- collapse repeated `-`
+
 `README.md` must include:
 
 - title
@@ -312,7 +319,7 @@ Preconditions:
 
 - common validations pass
 - current branch equals plan default branch
-- clean working tree (no staged/unstaged/untracked files)
+- no staged or unstaged tracked changes (ignore untracked files)
 
 Behavior:
 
@@ -384,12 +391,13 @@ Blocking behavior:
 ## `/milestone_review <milestone>`
 
 - set phase to `review`
-- run `/review`
+- call the shared `prepare_review` tool deterministically using branch scope against `plan.yaml.repo.default_branch`
+- use the returned review packet to perform the review and write milestone `review.md`
 - fix high and medium findings
 - rerun validation
 - commit review fixes as `<milestone-id>: review fixes` (prefer one commit)
 - write `review.md` including method/findings/fixes/deferred/rerun evidence/commit SHA
-- if `/review` unavailable, do manual self-review and state this explicitly
+- if `prepare_review` is unavailable, do manual self-review and state this explicitly
 - on failure: block milestone and create blocker report
 
 ## `/milestone_finish <milestone>`
@@ -510,7 +518,7 @@ Never:
 
 - run without active plan pointer (except `/planner`)
 - ignore repo identity mismatch
-- start milestone on dirty tree
+- start milestone with staged or unstaged tracked changes
 - silently ignore test failures
 - mark done without contract evidence
 - invent test/review success
@@ -545,3 +553,55 @@ When the plan is wrong:
 
 1. `/replanner <milestone>`
 2. `/resume_milestone <milestone>`
+
+---
+
+## Short example
+
+Example goal:
+
+> Add a planner workflow extension with milestone/task orchestration.
+
+Typical session:
+
+```text
+/planner Add a planner workflow extension with milestone/task orchestration
+```
+
+This creates a plan under `~/data/planner/<plan-name>/` and writes the active pointer to:
+
+```text
+<repo-root>/.pi/active_plan
+```
+
+Inspect the generated milestones, then run one end-to-end:
+
+```text
+/milestoner m1
+```
+
+If you want to drive the milestone manually instead of using `/milestoner`:
+
+```text
+/milestone_start m1
+/tasker m1-t1
+/tasker m1-t2
+/milestone_harden m1
+/milestone_review m1
+/milestone_finish m1
+```
+
+If execution blocks partway through:
+
+```text
+/resume_milestone m1
+```
+
+If the execution evidence shows the plan itself is wrong:
+
+```text
+/replanner m1
+/resume_milestone m1
+```
+
+Use milestone ids from `plan.yaml` and task ids from the milestone `spec.yaml` / `state.yaml`.

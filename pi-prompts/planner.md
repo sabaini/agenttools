@@ -23,7 +23,9 @@ Work description:
 
 ## Determinism rules
 
-- Derive `plan-name` from `$ARGUMENTS` using a stable lowercase slug (`[a-z0-9-]`, collapse repeated `-`).
+- Derive `plan-name` from the first 50 characters of `$ARGUMENTS`.
+- If `$ARGUMENTS` is longer than 50 characters, truncate before slug generation.
+- Slugify deterministically to stable lowercase (`[a-z0-9-]`, collapse repeated `-`).
 - Prefer stable milestone ids and slugs (`m1`, `m2`, ... in recommended execution order).
 - Keep `plan.yaml` small and index-focused.
 - Initialize each milestone `state.yaml` in `planned/not_started` state with null timestamps and per-task `planned` statuses.
