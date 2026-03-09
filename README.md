@@ -34,8 +34,15 @@ You can load it explicitly with `pi -e ./pi-extensions/planner-workflow.ts`.
 
 This repository is also a local pi package. It exposes:
 
-- extensions from `pi-extensions/*.ts`
-- prompt templates from `pi-prompts/*.md`
+- extensions from `pi-extensions/`
+- prompt templates from `pi-prompts/`
+
+Packaging note:
+
+- keep `package.json` manifest entries directory-based (`./pi-extensions`, `./pi-prompts`), not glob-only
+- this is important for local-package mode: directory entries reliably load nested extension entrypoints like `pi-extensions/review/index.ts`
+- with glob-only manifest entries, pi may still show the package in `pi list` while commands such as `/review` are missing because the package resources were not actually registered
+- after changing package resources, run `/reload`
 
 Install it globally so commands like `/milestoner` and `/review` are available in every project:
 

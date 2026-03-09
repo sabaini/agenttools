@@ -14,11 +14,10 @@
   ],
   "pi": {
     "extensions": [
-      "./pi-extensions/*.ts",
-      "./pi-extensions/*/index.ts"
+      "./pi-extensions"
     ],
     "prompts": [
-      "./pi-prompts/*.md"
+      "./pi-prompts"
     ]
   },
   "peerDependencies": {
