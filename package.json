@@ -5,6 +5,13 @@
   "keywords": [
     "pi-package"
   ],
+  "files": [
+    "pi-extensions/",
+    "pi-prompts/",
+    "docs/",
+    "README.md",
+    "package.json"
+  ],
   "pi": {
     "extensions": [
       "./pi-extensions/*.ts",

@@ -88,7 +88,7 @@ interface CompletionItem {
 }
 
 const STATUS_KEY = "planner-workflow";
-const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const PACKAGE_ROOT = resolvePackageRootFromModuleUrl(import.meta.url);
 const CHECKPOINT_STEPS = [
 	"not_started",
 	"tests_written",
@@ -101,6 +101,7 @@ const TASK_OUTCOMES = ["done", "blocked"] as const;
 const VALIDATION_KINDS = ["test", "build", "lint", "typecheck", "custom"] as const;
 const VALIDATION_ORIGINS = ["canonical", "exploratory"] as const;
 const VALIDATION_STAGES = ["hardening", "review"] as const;
+const MILESTONER_CONTINUATION_STAGES = ["task_execution", "hardening", "review"] as const;
 const REPLAN_MILESTONE_STATUSES = ["planned", "in_progress"] as const;
 const BLOCKER_TYPES = [
 	"clarification",
@@ -111,6 +112,15 @@ const BLOCKER_TYPES = [
 	"external_dependency",
 	"unknown",
 ] as const;
+
+function resolvePackageRootFromModuleUrl(moduleUrl: string): string {
+	const resolvedModulePath = fsSync.realpathSync(fileURLToPath(moduleUrl));
+	return path.resolve(path.dirname(resolvedModulePath), "..");
+}
+
+function resolveWorkflowContractPath(packageRoot = PACKAGE_ROOT): string {
+	return path.join(packageRoot, "docs", "planner-workflow.md");
+}
 
 const COMMAND_SPECS: Record<PlannerCommandName, CommandSpec> = {
 	planner: {
@@ -472,6 +482,72 @@ function registerPlannerWorkflowTools(pi: ExtensionAPI): void {
 					statePath,
 					executionPath,
 					timestamp,
+				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "planner_continue_milestoner",
+		label: "Planner Continue Milestoner",
+		description: "Queue the next native /milestoner stage after successful current-stage work.",
+		promptSnippet: "Queue the next native /milestoner step instead of waiting for another manual slash command.",
+		promptGuidelines: [
+			"Use this after /milestoner-owned task, hardening, review, or resume work succeeds and the milestone is not blocked or complete.",
+			"Do not call this tool after blocked outcomes.",
+		],
+		parameters: Type.Object({
+			milestone: Type.String({ description: "Milestone id/slug/directory from the active plan." }),
+			stage: StringEnum(MILESTONER_CONTINUATION_STAGES),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const milestoneContext = await resolveMilestoneToolContext(pi, ctx.cwd, ctx.ui, params.milestone);
+			await runPlanDefectPreflight("milestoner", milestoneContext.milestone, milestoneContext.milestoneDir);
+			const statePath = path.join(milestoneContext.milestoneDir, "state.yaml");
+			const stateRecord = await loadMilestoneStateRecord(statePath);
+			const currentPhase = asString(stateRecord.phase) ?? "not_started";
+			const checkpoint = asRecord(stateRecord.checkpoint);
+			const checkpointStep = normalizeCheckpointStep(asString(checkpoint?.step));
+			const activeTaskIds = (await loadMilestoneStateData(statePath)).tasks
+				.filter((task) => task.status === "in_progress")
+				.map((task) => task.id);
+
+			if (params.stage === "task_execution") {
+				if (checkpointStep !== "done") {
+					throw new Error(
+						`planner_continue_milestoner cannot advance milestone '${milestoneContext.milestone.id}' from task execution until the active checkpoint is done. Current checkpoint step: ${checkpointStep}`,
+					);
+				}
+				if (activeTaskIds.length > 0) {
+					throw new Error(
+						`planner_continue_milestoner cannot advance milestone '${milestoneContext.milestone.id}' while tasks remain in_progress: ${activeTaskIds.join(", ")}`,
+					);
+				}
+			} else if (currentPhase !== params.stage) {
+				throw new Error(
+					`planner_continue_milestoner expected milestone '${milestoneContext.milestone.id}' to still be in phase '${params.stage}', but found '${currentPhase}'.`,
+				);
+			}
+
+			await runMilestonerNative(
+				pi,
+				{
+					cwd: ctx.cwd,
+					ui: ctx.ui,
+					isIdle() {
+						return false;
+					},
+				} as ExtensionCommandContext,
+				milestoneContext.activePlan,
+				milestoneContext.milestone,
+				milestoneContext.milestoneDir,
+			);
+			return {
+				content: [{ type: "text", text: `Processed the next native /milestoner step for milestone ${milestoneContext.milestone.id}.` }],
+				details: {
+					milestoneId: milestoneContext.milestone.id,
+					stage: params.stage,
+					statePath,
 				},
 			};
 		},
@@ -1844,11 +1920,15 @@ async function runMilestonerNative(
 
 	const phase = state.phase ?? asString(stateRecord.phase) ?? "task_execution";
 	if (phase === "started" || phase === "task_execution") {
-		await runMilestoneHardenNative(pi, ctx, activePlan, milestone, milestoneDir);
+		await runMilestoneHardenNative(pi, ctx, activePlan, milestone, milestoneDir, {
+			continueMilestoner: true,
+		});
 		return;
 	}
 	if (phase === "hardening") {
-		await runMilestoneReviewNative(pi, ctx, activePlan, milestone, milestoneDir);
+		await runMilestoneReviewNative(pi, ctx, activePlan, milestone, milestoneDir, {
+			continueMilestoner: true,
+		});
 		return;
 	}
 	if (phase === "review") {
@@ -2179,7 +2259,7 @@ function buildNativeTaskerBrief(options: {
 	dependencyLines: string[];
 	invokedByMilestoner?: boolean;
 }): string {
-	const contractPath = path.join(PACKAGE_ROOT, "docs", "planner-workflow.md");
+	const contractPath = resolveWorkflowContractPath();
 	const milestoneGuidePath = path.join(options.milestoneDir, "milestone.md");
 	const specPath = path.join(options.milestoneDir, "spec.yaml");
 	const statePath = path.join(options.milestoneDir, "state.yaml");
@@ -2229,15 +2309,29 @@ function buildNativeTaskerBrief(options: {
 		"- `planner_append_execution_section` for intermediate execution evidence sections",
 		"- `planner_finalize_task_outcome` to atomically append final task evidence and mark the task `done` or `blocked`",
 		"- `planner_complete_task` / `planner_block_milestone` only for exceptional recovery or manual repair flows",
+		options.invokedByMilestoner
+			? `- \`planner_continue_milestoner\` after successful task completion to queue the next native /milestoner step for milestone \`${options.milestone.id}\` (use \`stage: "task_execution"\`)`
+			: undefined,
 		"If the task blocks, recommend `/resume_milestone <milestone>` unless evidence shows a plan defect that needs `/replanner`.",
+		options.invokedByMilestoner
+			? `After you finalize a successful task outcome, call \`planner_continue_milestoner\` with \`milestone: "${options.milestone.id}"\` and \`stage: "task_execution"\` unless the milestone is blocked or already finished.`
+			: undefined,
 		"",
 		"Required final response:",
-		"- milestone + task resolved",
-		"- task outcome (`done` or `blocked`)",
-		"- checkpoint state",
-		"- commit SHA (or explicit allow-empty reason)",
-		"- blocker file path + next command when blocked",
-	].join("\n");
+		...(options.invokedByMilestoner
+			? [
+				"- if the milestone blocks: milestone + task resolved, blocker file path, next command",
+				"- if you queued the next native /milestoner step: brief continuation note only",
+				"- if the milestone finishes in this turn: final milestone completion summary + key evidence",
+			]
+			: [
+				"- milestone + task resolved",
+				"- task outcome (`done` or `blocked`)",
+				"- checkpoint state",
+				"- commit SHA (or explicit allow-empty reason)",
+				"- blocker file path + next command when blocked",
+			]),
+	].filter(Boolean).join("\n");
 }
 
 async function runTaskerNative(
@@ -2310,7 +2404,7 @@ async function runTaskerNative(
 	dispatchWorkflowMessage(
 		pi,
 		ctx,
-		"tasker",
+		options?.invokedByMilestoner ? "milestoner" : "tasker",
 		buildNativeTaskerBrief({
 			milestone,
 			milestoneDir,
@@ -2428,8 +2522,9 @@ function buildNativeHardenBrief(options: {
 	milestone: PlanMilestone;
 	milestoneDir: string;
 	validationLines: string[];
+	continueMilestoner?: boolean;
 }): string {
-	const contractPath = path.join(PACKAGE_ROOT, "docs", "planner-workflow.md");
+	const contractPath = resolveWorkflowContractPath();
 	const specPath = path.join(options.milestoneDir, "spec.yaml");
 	const statePath = path.join(options.milestoneDir, "state.yaml");
 	const executionPath = path.join(options.milestoneDir, "execution.md");
@@ -2453,9 +2548,18 @@ function buildNativeHardenBrief(options: {
 		"- `planner_run_validation_profile` to execute `spec.yaml.validation.commands` with canonical vs exploratory blocking policy",
 		"- `planner_append_execution_section` for extra hardening evidence beyond the validation tool output",
 		"- `planner_block_milestone` only for non-validation blockers; validation blockers should normally come from `planner_run_validation_profile`",
+		options.continueMilestoner
+			? `- \`planner_continue_milestoner\` after successful hardening to queue the next native /milestoner step for milestone \`${options.milestone.id}\` (use \`stage: "hardening"\`)`
+			: undefined,
 		"Canonical validation failures block by default. Exploratory validation failures are advisory by default unless you explicitly escalate them because the milestone acceptance criteria or touched code makes them blocking.",
 		"If hardening creates code/docs changes, make the required milestone hardening commit and record it in execution evidence.",
-	].join("\n");
+		options.continueMilestoner
+			? `After successful hardening, call \`planner_continue_milestoner\` with \`milestone: "${options.milestone.id}"\` and \`stage: "hardening"\` unless the milestone is blocked or already finished.`
+			: undefined,
+		options.continueMilestoner
+			? "If you queued the next native /milestoner step, keep the response to a brief continuation note instead of a terminal hardening-only summary."
+			: undefined,
+	].filter(Boolean).join("\n");
 }
 
 function buildNativeReviewBrief(options: {
@@ -2465,8 +2569,9 @@ function buildNativeReviewBrief(options: {
 	reviewPath: string;
 	branchName: string;
 	baseBranch: string;
+	continueMilestoner?: boolean;
 }): string {
-	const contractPath = path.join(PACKAGE_ROOT, "docs", "planner-workflow.md");
+	const contractPath = resolveWorkflowContractPath();
 	const statePath = path.join(options.milestoneDir, "state.yaml");
 	const executionPath = path.join(options.milestoneDir, "execution.md");
 
@@ -2488,10 +2593,19 @@ function buildNativeReviewBrief(options: {
 		"- `planner_run_validation_profile` to rerun milestone validation with canonical vs exploratory policy after review fixes",
 		"- `planner_append_execution_section` for extra review evidence/rerun summaries beyond the validation tool output",
 		"- `planner_block_milestone` only for non-validation blockers; validation blockers should normally come from `planner_run_validation_profile`",
+		options.continueMilestoner
+			? `- \`planner_continue_milestoner\` after successful review completion to queue the next native /milestoner step for milestone \`${options.milestone.id}\` (use \`stage: "review"\`)`
+			: undefined,
 		"Canonical validation failures block by default. Exploratory validation failures are advisory by default unless you explicitly escalate them because the milestone acceptance criteria or touched code makes them blocking.",
+		options.continueMilestoner
+			? `After successful review completion, call \`planner_continue_milestoner\` with \`milestone: "${options.milestone.id}"\` and \`stage: "review"\` unless the milestone is blocked or already finished.`
+			: undefined,
+		options.continueMilestoner
+			? "If you queued the next native /milestoner step, keep the response to a brief continuation note instead of a terminal review-only summary."
+			: undefined,
 		"",
 		options.reviewPrompt.trim(),
-	].join("\n");
+	].filter(Boolean).join("\n");
 }
 
 async function runMilestoneHardenNative(
@@ -2500,7 +2614,7 @@ async function runMilestoneHardenNative(
 	activePlan: ActivePlanContext,
 	milestone: PlanMilestone,
 	milestoneDir: string,
-	options?: { resumeFromValidationBlocker?: boolean },
+	options?: { resumeFromValidationBlocker?: boolean; continueMilestoner?: boolean },
 ): Promise<void> {
 	await ensureMilestoneFiles(milestoneDir);
 	await runPlanDefectPreflight("milestone_harden", milestone, milestoneDir);
@@ -2548,11 +2662,12 @@ async function runMilestoneHardenNative(
 	dispatchWorkflowMessage(
 		pi,
 		ctx,
-		"milestone_harden",
+		options?.continueMilestoner ? "milestoner" : "milestone_harden",
 		buildNativeHardenBrief({
 			milestone,
 			milestoneDir,
 			validationLines,
+			continueMilestoner: options?.continueMilestoner,
 		}),
 	);
 }
@@ -2563,7 +2678,7 @@ async function runMilestoneReviewNative(
 	activePlan: ActivePlanContext,
 	milestone: PlanMilestone,
 	milestoneDir: string,
-	options?: { resumeFromValidationBlocker?: boolean },
+	options?: { resumeFromValidationBlocker?: boolean; continueMilestoner?: boolean },
 ): Promise<void> {
 	await ensureMilestoneFiles(milestoneDir);
 	await runPlanDefectPreflight("milestone_review", milestone, milestoneDir);
@@ -2620,7 +2735,7 @@ async function runMilestoneReviewNative(
 	dispatchWorkflowMessage(
 		pi,
 		ctx,
-		"milestone_review",
+		options?.continueMilestoner ? "milestoner" : "milestone_review",
 		buildNativeReviewBrief({
 			milestone,
 			milestoneDir,
@@ -2628,6 +2743,7 @@ async function runMilestoneReviewNative(
 			reviewPath,
 			branchName: prepared.branch,
 			baseBranch: activePlan.defaultBranch,
+			continueMilestoner: options?.continueMilestoner,
 		}),
 	);
 }
@@ -2802,7 +2918,7 @@ function buildNativeResumeBrief(options: {
 	blockerReason?: string;
 	archivedBlockerPath?: string;
 }): string {
-	const contractPath = path.join(PACKAGE_ROOT, "docs", "planner-workflow.md");
+	const contractPath = resolveWorkflowContractPath();
 	const milestoneGuidePath = path.join(options.milestoneDir, "milestone.md");
 	const specPath = path.join(options.milestoneDir, "spec.yaml");
 	const statePath = path.join(options.milestoneDir, "state.yaml");
@@ -2839,6 +2955,8 @@ function buildNativeResumeBrief(options: {
 		"- `planner_append_execution_section` for resume/intermediate evidence updates",
 		"- `planner_finalize_task_outcome` to atomically append final task evidence and mark the task `done` or `blocked`",
 		"- `planner_complete_task` / `planner_block_milestone` only for exceptional recovery or manual repair flows",
+		`- \`planner_continue_milestoner\` after successful resumed task completion to queue the next native /milestoner step for milestone \`${options.milestone.id}\` (use \`stage: "task_execution"\`)`,
+		`After the resumed task work succeeds, call \`planner_continue_milestoner\` with \`milestone: "${options.milestone.id}"\` and \`stage: "task_execution"\` unless the milestone is blocked or already finished.`,
 	].filter(Boolean).join("\n");
 }
 
@@ -2862,7 +2980,7 @@ function buildNativeReplannerBrief(options: {
 	blockerPath?: string;
 	archivedBlockerPaths: string[];
 }): string {
-	const contractPath = path.join(PACKAGE_ROOT, "docs", "planner-workflow.md");
+	const contractPath = resolveWorkflowContractPath();
 	const specPath = path.join(options.milestoneDir, "spec.yaml");
 	const statePath = path.join(options.milestoneDir, "state.yaml");
 	const executionPath = path.join(options.milestoneDir, "execution.md");
@@ -2978,12 +3096,14 @@ async function runResumeMilestoneNative(
 		if (blockedStage === "hardening_validation") {
 			await runMilestoneHardenNative(pi, ctx, activePlan, milestone, milestoneDir, {
 				resumeFromValidationBlocker: true,
+				continueMilestoner: true,
 			});
 			return;
 		}
 		if (blockedStage === "review_validation") {
 			await runMilestoneReviewNative(pi, ctx, activePlan, milestone, milestoneDir, {
 				resumeFromValidationBlocker: true,
+				continueMilestoner: true,
 			});
 			return;
 		}
@@ -3203,6 +3323,8 @@ export const __test = {
 	parseArgs,
 	splitShellArgs,
 	normalizeOriginUrl,
+	resolvePackageRootFromModuleUrl,
+	resolveWorkflowContractPath,
 	resolveMilestoneSelector,
 	getArgumentCompletionsForCommand,
 	collectMilestoneCompletionItems,

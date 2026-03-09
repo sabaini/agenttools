@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
 import plannerWorkflowExtension, { __test } from "../planner-workflow.ts";
 
@@ -36,6 +37,25 @@ test("normalizeOriginUrl normalizes ssh and https forms", () => {
 	const ssh = __test.normalizeOriginUrl("git@github.com:org/repo.git");
 	const https = __test.normalizeOriginUrl("https://github.com/org/repo");
 	assert.equal(ssh, https);
+});
+
+test("resolvePackageRootFromModuleUrl follows symlinked extension paths back to the real package root", async () => {
+	await withTempDir("planner-workflow-package-root-symlink-", async (root) => {
+		const packageRoot = path.join(root, "agenttools");
+		const realExtensionsDir = path.join(packageRoot, "pi-extensions");
+		const linkedAgentRoot = path.join(root, ".pi", "agent");
+		const symlinkedExtensionsDir = path.join(linkedAgentRoot, "extensions");
+		const realModulePath = path.join(realExtensionsDir, "planner-workflow.ts");
+		const symlinkedModulePath = path.join(symlinkedExtensionsDir, "planner-workflow.ts");
+
+		await fs.mkdir(realExtensionsDir, { recursive: true });
+		await fs.mkdir(linkedAgentRoot, { recursive: true });
+		await fs.writeFile(realModulePath, "export default {}\n", "utf8");
+		await fs.symlink(realExtensionsDir, symlinkedExtensionsDir, "dir");
+
+		assert.equal(__test.resolvePackageRootFromModuleUrl(pathToFileURL(symlinkedModulePath).href), packageRoot);
+		assert.equal(__test.resolveWorkflowContractPath(packageRoot), path.join(packageRoot, "docs", "planner-workflow.md"));
+	});
 });
 
 test("milestone command completions derive ids/slugs from active plan", async () => {
@@ -1474,6 +1494,8 @@ test("milestoner starts a planned milestone and kicks off the first ordered task
 		assert.equal(sentMessages.length, 1);
 		assert.ok(sentMessages[0].includes("Continue the native /milestoner workflow for milestone `m1` / `alpha`. Current task: `m1-t1`."));
 		assert.ok(sentMessages[0].includes("Do not redirect the user to run /tasker manually"));
+		assert.ok(sentMessages[0].includes("`planner_continue_milestoner`"));
+		assert.ok(sentMessages[0].includes("stage: \"task_execution\""));
 		assert.ok(!sentMessages[0].includes("m1-t2"), "expected topological ordering to pick the first ready task");
 
 		const state = await fs.readFile(path.join(milestoneDir, "state.yaml"), "utf8");
@@ -1622,6 +1644,8 @@ test("milestoner runs milestone_harden natively after tasks are complete", async
 		assert.ok(sentMessages[0].includes("Continue the native /milestone_harden workflow"));
 		assert.ok(sentMessages[0].includes("`planner_run_validation_profile`"));
 		assert.ok(sentMessages[0].includes("`planner_append_execution_section`"));
+		assert.ok(sentMessages[0].includes("`planner_continue_milestoner`"));
+		assert.ok(sentMessages[0].includes("stage: \"hardening\""));
 		assert.ok(sentMessages[0].includes("`npm test` (test / canonical)"));
 
 		const state = await fs.readFile(path.join(milestoneDir, "state.yaml"), "utf8");
@@ -2264,6 +2288,143 @@ test("planner_block_milestone warns when used for routine task-execution blockin
 			),
 			"expected planner_block_milestone to warn when used for routine task blocking",
 		);
+	});
+});
+
+test("planner_continue_milestoner queues the next task as a follow-up after successful task completion", async () => {
+	await withTempDir("planner-workflow-tool-continue-milestoner-task-", async (root) => {
+		const repoRoot = path.join(root, "repo");
+		const planRoot = path.join(root, "plans", "demo-plan");
+		const milestoneDir = path.join(planRoot, "milestones", "m1-alpha");
+		await fs.mkdir(path.join(repoRoot, ".git"), { recursive: true });
+		await fs.mkdir(path.join(repoRoot, ".pi"), { recursive: true });
+		await fs.mkdir(milestoneDir, { recursive: true });
+
+		await fs.writeFile(
+			path.join(planRoot, "plan.yaml"),
+			[
+				"schema_version: 1",
+				"repo:",
+				`  root: ${repoRoot}`,
+				"  default_branch: main",
+				"milestones:",
+				"  - id: m1",
+				"    slug: alpha",
+				"    path: milestones/m1-alpha/",
+			].join("\n"),
+			"utf8",
+		);
+		await fs.writeFile(path.join(repoRoot, ".pi", "active_plan"), `${planRoot}\n`, "utf8");
+		await fs.writeFile(
+			path.join(milestoneDir, "spec.yaml"),
+			[
+				"tasks:",
+				"  - id: m1-t1",
+				"    title: first task",
+				"  - id: m1-t2",
+				"    title: second task",
+				"    depends_on:",
+				"      - m1-t1",
+			].join("\n"),
+			"utf8",
+		);
+		await fs.writeFile(
+			path.join(milestoneDir, "state.yaml"),
+			[
+				"status: in_progress",
+				"phase: task_execution",
+				"branch: feat/alpha",
+				"blocked_at: null",
+				"updated_at: null",
+				"blocked_on: null",
+				"checkpoint:",
+				"  task_id: m1-t1",
+				"  step: done",
+				"last_completed_task: m1-t1",
+				"tasks:",
+				"  - id: m1-t1",
+				"    status: done",
+				"    commit: abc1234",
+				"  - id: m1-t2",
+				"    status: planned",
+				"    commit: null",
+			].join("\n"),
+			"utf8",
+		);
+		await fs.writeFile(path.join(milestoneDir, "execution.md"), "# execution\n", "utf8");
+		await fs.writeFile(path.join(milestoneDir, "milestone.md"), "# milestone\n", "utf8");
+
+		const commands = new Map<string, { handler: (rawArgs: string, ctx: unknown) => Promise<void> }>();
+		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+		const sentMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
+		const notifications: Array<{ message: string; level: string }> = [];
+
+		const pi = {
+			registerCommand(name: string, command: { handler: (rawArgs: string, ctx: unknown) => Promise<void> }) {
+				commands.set(name, command);
+			},
+			registerTool(definition: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) {
+				tools.set(definition.name, definition);
+			},
+			getCommands() {
+				return [];
+			},
+			async exec(command: string, args: string[]) {
+				assert.equal(command, "git");
+				if (JSON.stringify(args) === JSON.stringify(["rev-parse", "--show-toplevel"])) {
+					return { code: 0, stdout: `${repoRoot}\n`, stderr: "" };
+				}
+				if (JSON.stringify(args) === JSON.stringify(["-C", repoRoot, "rev-parse", "--abbrev-ref", "HEAD"])) {
+					return { code: 0, stdout: "feat/alpha\n", stderr: "" };
+				}
+				throw new Error(`unexpected git args: ${JSON.stringify(args)}`);
+			},
+			sendUserMessage(message: string, options?: { deliverAs?: string }) {
+				sentMessages.push({ message, options });
+			},
+		};
+
+		plannerWorkflowExtension(pi as never);
+		const continueTool = tools.get("planner_continue_milestoner");
+		assert.ok(continueTool);
+
+		await continueTool.execute(
+			"tool-continue-milestoner",
+			{
+				milestone: "m1",
+				stage: "task_execution",
+			},
+			undefined,
+			undefined,
+			{
+				cwd: repoRoot,
+				ui: {
+					notify(message: string, level: string) {
+						notifications.push({ message, level });
+					},
+				},
+			} as never,
+		);
+
+		assert.equal(sentMessages.length, 1);
+		assert.equal(sentMessages[0].options?.deliverAs, "followUp");
+		assert.ok(sentMessages[0].message.includes("Current task: `m1-t2`"));
+		assert.ok(sentMessages[0].message.includes("`planner_continue_milestoner`"));
+		assert.ok(sentMessages[0].message.includes("stage: \"task_execution\""));
+		assert.ok(
+			notifications.some(
+				(entry) => entry.level === "info" && entry.message.includes("Queued validated /milestoner workflow as follow-up."),
+			),
+			"expected continuation tool to queue the next milestoner step as a follow-up",
+		);
+
+		const state = await fs.readFile(path.join(milestoneDir, "state.yaml"), "utf8");
+		assert.ok(state.includes("task_id: m1-t2"));
+		assert.ok(state.includes("step: not_started"));
+		assert.ok(state.includes("- id: m1-t2\n    status: in_progress"));
+
+		const execution = await fs.readFile(path.join(milestoneDir, "execution.md"), "utf8");
+		assert.ok(execution.includes("task `m1-t2` started"));
 	});
 });
 
