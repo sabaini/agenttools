@@ -180,9 +180,35 @@ export async function getCurrentBranch(pi: ExtensionAPI): Promise<string> {
 	return result.stdout.trim() || "HEAD";
 }
 
+function branchRefCandidates(base: string): string[] {
+	const normalized = base.trim();
+	if (!normalized) return [];
+
+	if (normalized.startsWith("refs/heads/") || normalized.startsWith("refs/remotes/")) {
+		return [normalized];
+	}
+
+	const candidates = new Set<string>([
+		`refs/heads/${normalized}`,
+		`refs/remotes/${normalized}`,
+	]);
+
+	if (!normalized.includes("/")) {
+		candidates.add(`refs/remotes/origin/${normalized}`);
+	}
+
+	return Array.from(candidates);
+}
+
 export async function ensureBaseExists(pi: ExtensionAPI, base: string): Promise<boolean> {
-	const check = await pi.exec("git", ["rev-parse", "--verify", base]);
-	return check.code === 0;
+	for (const candidate of branchRefCandidates(base)) {
+		const check = await pi.exec("git", ["show-ref", "--verify", "--quiet", candidate]);
+		if (check.code === 0) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 export async function getUntrackedDiff(pi: ExtensionAPI): Promise<string> {
@@ -537,7 +563,9 @@ export async function prepareReviewRequest(
 				throw new Error("Branch review requires a base ref.");
 			}
 			if (!(await ensureBaseExists(pi, base))) {
-				throw new Error(`Base branch '${base}' not found.`);
+				throw new Error(
+					`Base branch '${base}' not found. Branch scope only accepts branch refs (for example 'main' or 'origin/main').`,
+				);
 			}
 			reviewInputText = await getBranchDiff(pi, base, head);
 			reviewInputLabel = `${base}...${head}`;

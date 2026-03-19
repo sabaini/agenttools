@@ -43,8 +43,13 @@ test("prepareReviewRequest builds a deterministic branch review packet", async (
 				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "HEAD") {
 					return { code: 0, stdout: "feat/review-core\n", stderr: "" };
 				}
-				if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "main") {
-					return { code: 0, stdout: "main\n", stderr: "" };
+				if (
+					args[0] === "show-ref" &&
+					args[1] === "--verify" &&
+					args[2] === "--quiet" &&
+					args[3] === "refs/heads/main"
+				) {
+					return { code: 0, stdout: "", stderr: "" };
 				}
 				if (args[0] === "diff" && args[1] === "main...feat/review-core") {
 					return {
@@ -68,6 +73,67 @@ test("prepareReviewRequest builds a deterministic branch review packet", async (
 		assert.match(prepared.prompt, /Diff \(main\.\.\.feat\/review-core\):/);
 		assert.match(prepared.prompt, /diff --git a\/file\.ts b\/file\.ts/);
 		assert.match(prepared.prompt, /Write the full review as Markdown to `\.pi\/reviews\/review-/);
+	});
+});
+
+test("prepareReviewRequest rejects commit-range base refs for branch scope", async () => {
+	await withTempDir("review-core-branch-range-", async (root) => {
+		const promptPath = path.join(root, "review-correctness.md");
+		await fs.writeFile(
+			promptPath,
+			[
+				"---",
+				"description: Review for correctness",
+				"---",
+				"Review the code for correctness.",
+			].join("\n"),
+			"utf8",
+		);
+
+		const pi = {
+			getCommands() {
+				return [{ source: "prompt", name: "review-correctness", path: promptPath }];
+			},
+			async exec(command: string, args: string[]) {
+				assert.equal(command, "git");
+				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "HEAD") {
+					return { code: 0, stdout: "main\n", stderr: "" };
+				}
+				if (
+					args[0] === "show-ref" &&
+					args[1] === "--verify" &&
+					args[2] === "--quiet" &&
+					args[3] === "refs/heads/HEAD^"
+				) {
+					return { code: 1, stdout: "", stderr: "" };
+				}
+				if (
+					args[0] === "show-ref" &&
+					args[1] === "--verify" &&
+					args[2] === "--quiet" &&
+					args[3] === "refs/remotes/HEAD^"
+				) {
+					return { code: 1, stdout: "", stderr: "" };
+				}
+				if (
+					args[0] === "show-ref" &&
+					args[1] === "--verify" &&
+					args[2] === "--quiet" &&
+					args[3] === "refs/remotes/origin/HEAD^"
+				) {
+					return { code: 1, stdout: "", stderr: "" };
+				}
+				throw new Error(`unexpected exec args: ${JSON.stringify(args)}`);
+			},
+		};
+
+		await assert.rejects(
+			() =>
+				prepareReviewRequest(pi as never, {
+					scope: { kind: "branch", base: "HEAD^" },
+				}),
+			/Base branch 'HEAD\^' not found\. Branch scope only accepts branch refs/,
+		);
 	});
 });
 

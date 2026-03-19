@@ -58,6 +58,8 @@ Then reload pi resources:
 
 The review extension also registers a shared `prepare_review` tool. `/review` uses the same core review-preparation logic as planner-driven milestone review, and native `/milestone_review` requires that tool to be installed and active.
 
+Branch-scoped reviews now require a real branch ref as the base (for example `main` or `origin/main`). Commit-range expressions like `HEAD^` are rejected; use repository scope when you want a full-codebase review.
+
 ### Quick example
 
 ```text

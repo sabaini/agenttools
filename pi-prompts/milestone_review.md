@@ -11,6 +11,10 @@ Native expectations:
 
 - require active deterministic review tooling via `prepare_review`
 - prepare deterministic review input with `prepare_review`
+- review the full branch diff as merge-ready code, not just the milestone's intended scope
+- use milestone scope/spec as context only; do not downgrade defects in changed behavior because a later milestone may also touch that area
+- cross-check changed public APIs, write paths, and lifecycle behavior against repo docs / documented invariants
+- explicitly inventory changed public behavior in `review.md` before findings
 - write milestone `review.md`
 - fix high and medium findings
 - rerun milestone validation with `planner_run_validation_profile`
