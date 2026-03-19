@@ -77,6 +77,16 @@ export interface PreparedReviewRequest {
 	prompt: string;
 }
 
+export interface RepositorySnapshot {
+	text: string;
+	stats: {
+		scannedFiles: number;
+		ignoredFiles: number;
+		skippedBinaryFiles: number;
+		skippedUnreadableFiles: number;
+	};
+}
+
 function toReviewLabel(id: string): string {
 	return id.slice(REVIEW_PREFIX.length).replace(/-/g, " ");
 }
@@ -180,35 +190,62 @@ export async function getCurrentBranch(pi: ExtensionAPI): Promise<string> {
 	return result.stdout.trim() || "HEAD";
 }
 
-function branchRefCandidates(base: string): string[] {
-	const normalized = base.trim();
-	if (!normalized) return [];
+export type RefRange = {
+	base: string;
+	head: string;
+	operator: ".." | "...";
+};
 
-	if (normalized.startsWith("refs/heads/") || normalized.startsWith("refs/remotes/")) {
-		return [normalized];
+export function parseRefRange(value: string): RefRange | null {
+	const normalized = value.trim();
+	if (!normalized) {
+		return null;
 	}
 
-	const candidates = new Set<string>([
-		`refs/heads/${normalized}`,
-		`refs/remotes/${normalized}`,
-	]);
-
-	if (!normalized.includes("/")) {
-		candidates.add(`refs/remotes/origin/${normalized}`);
+	const tripleDot = normalized.indexOf("...");
+	if (tripleDot > -1) {
+		const base = normalized.slice(0, tripleDot).trim();
+		const head = normalized.slice(tripleDot + 3).trim();
+		if (!base || !head) {
+			return null;
+		}
+		return { base, head, operator: "..." };
 	}
 
-	return Array.from(candidates);
+	const doubleDot = normalized.indexOf("..");
+	if (doubleDot > -1) {
+		const base = normalized.slice(0, doubleDot).trim();
+		const head = normalized.slice(doubleDot + 2).trim();
+		if (!base || !head) {
+			return null;
+		}
+		return { base, head, operator: ".." };
+	}
+
+	return null;
 }
 
-export async function ensureBaseExists(pi: ExtensionAPI, base: string): Promise<boolean> {
-	for (const candidate of branchRefCandidates(base)) {
-		const check = await pi.exec("git", ["show-ref", "--verify", "--quiet", candidate]);
-		if (check.code === 0) {
-			return true;
-		}
+export async function ensureGitRefExists(pi: ExtensionAPI, ref: string): Promise<boolean> {
+	const normalized = ref.trim();
+	if (!normalized) {
+		return false;
 	}
 
-	return false;
+	const check = await pi.exec("git", ["rev-parse", "--verify", "--quiet", `${normalized}^{commit}`]);
+	return check.code === 0;
+}
+
+export async function ensureGitRevisionExpressionExists(
+	pi: ExtensionAPI,
+	revisionExpression: string,
+): Promise<boolean> {
+	const normalized = revisionExpression.trim();
+	if (!normalized) {
+		return false;
+	}
+
+	const check = await pi.exec("git", ["rev-list", "--max-count=1", normalized]);
+	return check.code === 0 && check.stdout.trim().length > 0;
 }
 
 export async function getUntrackedDiff(pi: ExtensionAPI): Promise<string> {
@@ -257,8 +294,24 @@ export async function getWorkingDiff(pi: ExtensionAPI): Promise<string> {
 	return output;
 }
 
-export async function getBranchDiff(pi: ExtensionAPI, base: string, head: string): Promise<string> {
-	const diff = await pi.exec("git", ["diff", `${base}...${head}`]);
+export async function getBranchDiff(
+	pi: ExtensionAPI,
+	base: string,
+	head: string,
+	operator: ".." | "..." = "...",
+): Promise<string> {
+	const diff = await pi.exec("git", ["diff", `${base}${operator}${head}`]);
+	if (diff.code !== 0) {
+		throw new Error(diff.stderr.trim() || "git diff failed");
+	}
+	return diff.stdout;
+}
+
+export async function getRevisionExpressionDiff(
+	pi: ExtensionAPI,
+	revisionExpression: string,
+): Promise<string> {
+	const diff = await pi.exec("git", ["diff", revisionExpression]);
 	if (diff.code !== 0) {
 		throw new Error(diff.stderr.trim() || "git diff failed");
 	}
@@ -267,6 +320,15 @@ export async function getBranchDiff(pi: ExtensionAPI, base: string, head: string
 
 export async function getCommitLog(pi: ExtensionAPI, base: string, head: string): Promise<string> {
 	const log = await pi.exec("git", ["log", "--oneline", `${base}..${head}`]);
+	if (log.code !== 0) return "";
+	return log.stdout.trim();
+}
+
+export async function getRevisionExpressionCommitLog(
+	pi: ExtensionAPI,
+	revisionExpression: string,
+): Promise<string> {
+	const log = await pi.exec("git", ["log", "--oneline", revisionExpression]);
 	if (log.code !== 0) return "";
 	return log.stdout.trim();
 }
@@ -291,7 +353,7 @@ export async function getIgnoredFiles(pi: ExtensionAPI): Promise<Set<string>> {
 	);
 }
 
-export async function getRepositorySnapshot(pi: ExtensionAPI): Promise<string> {
+export async function getRepositorySnapshot(pi: ExtensionAPI): Promise<RepositorySnapshot> {
 	const tracked = await pi.exec("git", ["ls-files"]);
 	if (tracked.code !== 0) {
 		throw new Error(tracked.stderr.trim() || "git ls-files failed");
@@ -333,13 +395,23 @@ export async function getRepositorySnapshot(pi: ExtensionAPI): Promise<string> {
 		}
 	}
 
-	const header =
-		`Repository snapshot (${files.length} files scanned)` +
-		`\nIgnored by .gitignore: ${ignored.size}` +
-		`\nSkipped binary files: ${skippedBinary}` +
-		`\nSkipped unreadable files: ${skippedUnreadable}`;
+	const stats = {
+		scannedFiles: files.length,
+		ignoredFiles: ignored.size,
+		skippedBinaryFiles: skippedBinary,
+		skippedUnreadableFiles: skippedUnreadable,
+	};
 
-	return `${header}${output}`;
+	const header =
+		`Repository snapshot (${stats.scannedFiles} files scanned)` +
+		`\nIgnored by .gitignore: ${stats.ignoredFiles}` +
+		`\nSkipped binary files: ${stats.skippedBinaryFiles}` +
+		`\nSkipped unreadable files: ${stats.skippedUnreadableFiles}`;
+
+	return {
+		text: `${header}${output}`,
+		stats,
+	};
 }
 
 function formatSize(bytes: number): string {
@@ -386,20 +458,43 @@ function truncateHeadText(text: string): {
 	};
 }
 
-export async function applyTruncation(text: string, label: string, extension: string): Promise<string> {
+type TruncationWithNotice = {
+	content: string;
+	notice: string | null;
+};
+
+async function applyTruncationWithNotice(
+	text: string,
+	label: string,
+	extension: string,
+): Promise<TruncationWithNotice> {
 	const truncation = truncateHeadText(text);
 
 	let result = truncation.content;
-	if (truncation.truncated) {
-		const tempPath = path.join(os.tmpdir(), `pi-review-${Date.now()}${extension}`);
-		await fs.writeFile(tempPath, text);
-		result +=
-			"\n\n[" +
-			`${label} truncated: ${truncation.outputLines} of ${truncation.totalLines} lines ` +
-			`(${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). ` +
-			`Full ${label.toLowerCase()} saved to: ${tempPath}]`;
+	if (!truncation.truncated) {
+		return {
+			content: result,
+			notice: null,
+		};
 	}
-	return result;
+
+	const tempPath = path.join(os.tmpdir(), `pi-review-${Date.now()}${extension}`);
+	await fs.writeFile(tempPath, text);
+	const notice =
+		`${label} truncated: ${truncation.outputLines} of ${truncation.totalLines} lines ` +
+		`(${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}). ` +
+		`Full ${label.toLowerCase()} saved to: ${tempPath}`;
+
+	result += `\n\n[${notice}]`;
+	return {
+		content: result,
+		notice,
+	};
+}
+
+export async function applyTruncation(text: string, label: string, extension: string): Promise<string> {
+	const truncated = await applyTruncationWithNotice(text, label, extension);
+	return truncated.content;
 }
 
 export function sanitizeFileComponent(value: string): string {
@@ -549,6 +644,7 @@ export async function prepareReviewRequest(
 	let reviewInputFence = "diff";
 	let commitLog = "";
 	let prContext = "";
+	let repositorySnapshotStats: RepositorySnapshot["stats"] | null = null;
 
 	switch (options.scope.kind) {
 		case "working-tree": {
@@ -557,25 +653,59 @@ export async function prepareReviewRequest(
 			break;
 		}
 		case "branch": {
-			const base = options.scope.base.trim();
-			const head = options.scope.head?.trim() || branch;
-			if (!base) {
+			const baseInput = options.scope.base.trim();
+			const explicitHead = options.scope.head?.trim();
+			if (!baseInput) {
 				throw new Error("Branch review requires a base ref.");
 			}
-			if (!(await ensureBaseExists(pi, base))) {
+
+			let base = baseInput;
+			let head = explicitHead || branch;
+			let operator: ".." | "..." = "...";
+			let revisionExpression: string | null = null;
+
+			if (!explicitHead) {
+				const parsedRange = parseRefRange(baseInput);
+				if (parsedRange) {
+					base = parsedRange.base;
+					head = parsedRange.head;
+					operator = parsedRange.operator;
+				} else if (!(await ensureGitRefExists(pi, baseInput))) {
+					if (await ensureGitRevisionExpressionExists(pi, baseInput)) {
+						revisionExpression = baseInput;
+					} else {
+						throw new Error(
+							`Base ref '${baseInput}' not found. Use any existing branch, tag, or commit SHA.`,
+						);
+					}
+				}
+			}
+
+			if (revisionExpression) {
+				reviewInputText = await getRevisionExpressionDiff(pi, revisionExpression);
+				reviewInputLabel = revisionExpression;
+				if (wantsCommitLog(activeReviews)) {
+					commitLog = await getRevisionExpressionCommitLog(pi, revisionExpression);
+				}
+				break;
+			}
+
+			if (!(await ensureGitRefExists(pi, base))) {
 				throw new Error(
-					`Base branch '${base}' not found. Branch scope only accepts branch refs (for example 'main' or 'origin/main').`,
+					`Base ref '${base}' not found. Use any existing branch, tag, or commit SHA.`,
 				);
 			}
-			reviewInputText = await getBranchDiff(pi, base, head);
-			reviewInputLabel = `${base}...${head}`;
+			reviewInputText = await getBranchDiff(pi, base, head, operator);
+			reviewInputLabel = `${base}${operator}${head}`;
 			if (wantsCommitLog(activeReviews)) {
 				commitLog = await getCommitLog(pi, base, head);
 			}
 			break;
 		}
 		case "repository": {
-			reviewInputText = await getRepositorySnapshot(pi);
+			const snapshot = await getRepositorySnapshot(pi);
+			reviewInputText = snapshot.text;
+			repositorySnapshotStats = snapshot.stats;
 			reviewInputLabel = "repository snapshot";
 			reviewInputTitle = "Codebase";
 			reviewInputFence = "text";
@@ -613,11 +743,32 @@ export async function prepareReviewRequest(
 
 	const outputPath = options.outputPath?.trim() || buildReviewOutputPath(branch);
 	const reviewBlocks = activeReviews.map((review) => `### ${review.label}\n${review.prompt}`).join("\n\n");
-	const reviewInputBody = await applyTruncation(
+	const reviewInputTruncation = await applyTruncationWithNotice(
 		reviewInputText,
 		reviewInputTitle,
 		reviewInputFence === "diff" ? ".diff" : ".txt",
 	);
+	const reviewInputBody = reviewInputTruncation.content;
+	const isRepositoryScope = options.scope.kind === "repository";
+	const scopeHeading = isRepositoryScope
+		? "Please review the complete codebase."
+		: "Please review the following changes.";
+	const scopeContract = isRepositoryScope
+		? "\n\nScope contract:" +
+			"\n- This is a complete-codebase review. Do not limit the review to recent commits, branch diffs, or the last commit." +
+			"\n- Review the full repository snapshot (tracked + untracked files, excluding .gitignored files)."
+		: "";
+	const repositoryInventory = isRepositoryScope && repositorySnapshotStats
+		? "\n\nRepository inventory:" +
+			`\n- Files scanned: ${repositorySnapshotStats.scannedFiles}` +
+			`\n- Ignored by .gitignore: ${repositorySnapshotStats.ignoredFiles}` +
+			`\n- Skipped binary files: ${repositorySnapshotStats.skippedBinaryFiles}` +
+			`\n- Skipped unreadable files: ${repositorySnapshotStats.skippedUnreadableFiles}`
+		: "";
+	const repositoryTruncationNote = isRepositoryScope && reviewInputTruncation.notice
+		? `\n\nImportant: ${reviewInputTruncation.notice}. ` +
+			"Continue by inspecting the full snapshot file before finalizing the review."
+		: "";
 	const commitSection = commitLog
 		? `\n\nCommit log (${reviewInputLabel.replace("...", "..")}):\n\n${commitLog}`
 		: "";
@@ -627,8 +778,12 @@ export async function prepareReviewRequest(
 		: "";
 
 	const prompt =
-		"Please review the following changes.\n\n" +
+		scopeHeading +
+		"\n\n" +
 		reviewBlocks +
+		scopeContract +
+		repositoryInventory +
+		repositoryTruncationNote +
 		prContext +
 		commitSection +
 		outputInstruction +
@@ -664,4 +819,5 @@ export const __test = {
 	buildReviewOutputPath,
 	resolveSelectedReviews,
 	wantsCommitLog,
+	parseRefRange,
 };

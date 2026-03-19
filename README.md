@@ -58,7 +58,22 @@ Then reload pi resources:
 
 The review extension also registers a shared `prepare_review` tool. `/review` uses the same core review-preparation logic as planner-driven milestone review, and native `/milestone_review` requires that tool to be installed and active.
 
-Branch-scoped reviews now require a real branch ref as the base (for example `main` or `origin/main`). Commit-range expressions like `HEAD^` are rejected; use repository scope when you want a full-codebase review.
+Branch-scoped reviews accept any valid git ref (branch/tag/commit) for `base` and `head`. You can also pass a revision expression in `base` (for example `base..head`, `base...head`, or single-commit selectors like `abc123^!`) when using `/review` custom range mode or `prepare_review` branch scope.
+
+Examples:
+
+```text
+# /review UI -> choose "Custom ref range"
+HEAD^...HEAD
+v1.2.0..main
+abc1234...def5678
+05dce7c^!
+
+# tool form
+prepare_review scope=branch base=HEAD^...HEAD
+prepare_review scope=branch base=v1.2.0..main
+prepare_review scope=branch base=05dce7c^!
+```
 
 ### Quick example
 

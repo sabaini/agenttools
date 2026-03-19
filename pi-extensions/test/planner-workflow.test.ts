@@ -3298,10 +3298,14 @@ test("milestone_review runs natively, advances phase, and dispatches a prepared 
 					return { code: 0, stdout: "feat/alpha\n", stderr: "" };
 				}
 				if (
-					args[0] === "show-ref" &&
-					args[1] === "--verify" &&
-					args[2] === "--quiet" &&
-					args[3] === "refs/heads/main"
+					(args[0] === "show-ref" &&
+						args[1] === "--verify" &&
+						args[2] === "--quiet" &&
+						args[3] === "refs/heads/main") ||
+					(args[0] === "rev-parse" &&
+						args[1] === "--verify" &&
+						args[2] === "--quiet" &&
+						args[3] === "main^{commit}")
 				) {
 					return { code: 0, stdout: "", stderr: "" };
 				}
@@ -4040,10 +4044,14 @@ test("resume_milestone reruns review after a blocked review validation", async (
 					return { code: 0, stdout: "feat/alpha\n", stderr: "" };
 				}
 				if (
-					args[0] === "show-ref" &&
-					args[1] === "--verify" &&
-					args[2] === "--quiet" &&
-					args[3] === "refs/heads/main"
+					(args[0] === "show-ref" &&
+						args[1] === "--verify" &&
+						args[2] === "--quiet" &&
+						args[3] === "refs/heads/main") ||
+					(args[0] === "rev-parse" &&
+						args[1] === "--verify" &&
+						args[2] === "--quiet" &&
+						args[3] === "main^{commit}")
 				) {
 					return { code: 0, stdout: "", stderr: "" };
 				}

@@ -27,8 +27,8 @@ const prepareReviewSchema = Type.Object({
 	reviewIds: Type.Optional(
 		Type.Array(Type.String({ description: "Review prompt ids like review-correctness" })),
 	),
-	base: Type.Optional(Type.String({ description: "Base ref for branch reviews" })),
-	head: Type.Optional(Type.String({ description: "Head ref for branch reviews (defaults to current branch)" })),
+	base: Type.Optional(Type.String({ description: "Base ref (branch/tag/commit) or range expression for branch reviews" })),
+	head: Type.Optional(Type.String({ description: "Head ref (branch/tag/commit) for branch reviews (defaults to current branch)" })),
 	prRef: Type.Optional(Type.String({ description: "PR number or URL for pull-request reviews" })),
 	outputPath: Type.Optional(Type.String({ description: "Markdown file path the review should be written to" })),
 });
@@ -212,7 +212,8 @@ async function chooseScope(
 	const scope = await ctx.ui.select("Compare which changes?", [
 		"Uncommitted changes (staged + unstaged + untracked)",
 		`Current branch (${branch}) vs ${MAIN_BRANCH}`,
-		"Current branch vs another base",
+		"Current branch vs another base ref",
+		"Custom ref range (base..head or base...head)",
 		prOption,
 		"Complete code base (excluding .gitignored files)",
 	]);
@@ -224,10 +225,15 @@ async function chooseScope(
 	if (scope.includes(`vs ${MAIN_BRANCH}`)) {
 		return { kind: "branch", base: MAIN_BRANCH, head: branch };
 	}
-	if (scope.startsWith("Current branch vs another base")) {
-		const base = await ctx.ui.input("Base branch:", MAIN_BRANCH);
+	if (scope.startsWith("Current branch vs another base ref")) {
+		const base = await ctx.ui.input("Base ref (branch/tag/commit):", MAIN_BRANCH);
 		if (!base) return undefined;
 		return { kind: "branch", base: base.trim(), head: branch };
+	}
+	if (scope.startsWith("Custom ref range")) {
+		const range = await ctx.ui.input("Range expression (base..head or base...head):", `${MAIN_BRANCH}...${branch}`);
+		if (!range) return undefined;
+		return { kind: "branch", base: range.trim() };
 	}
 	if (scope.startsWith("GitHub Pull Request")) {
 		if (!ghAvailable) {
