@@ -464,7 +464,16 @@ Blocking behavior:
 - set phase to `review`
 - require the shared `prepare_review` tool to be installed and active
 - call `prepare_review` deterministically using branch scope against `plan.yaml.repo.default_branch`
+- treat the prepared branch diff as the primary review scope:
+  - review the full `base...head` branch as if it could merge now, not just the milestone's intended scope
+  - use milestone scope as context only; it must never lower severity for defects in changed code
+  - cross-check changed public APIs, persistence paths, and lifecycle behaviors against repo docs / documented invariants, not just the milestone spec
+  - do not defer correctness gaps in already-exposed changed behavior to a later milestone unless the behavior is not actually exposed on this branch
 - use the returned review packet to perform the review and write milestone `review.md`
+- explicitly inventory changed public behavior in `review.md` before findings:
+  - new or changed public functions/classes
+  - new write paths / side effects
+  - documented invariants touched by the branch
 - fix high and medium findings
 - rerun `spec.yaml.validation.commands` using the canonical vs exploratory policy above
 - commit review fixes as `<milestone-id>: review fixes` (prefer one commit)

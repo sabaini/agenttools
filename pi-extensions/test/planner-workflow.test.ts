@@ -3297,8 +3297,13 @@ test("milestone_review runs natively, advances phase, and dispatches a prepared 
 				) {
 					return { code: 0, stdout: "feat/alpha\n", stderr: "" };
 				}
-				if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "main") {
-					return { code: 0, stdout: "main\n", stderr: "" };
+				if (
+					args[0] === "show-ref" &&
+					args[1] === "--verify" &&
+					args[2] === "--quiet" &&
+					args[3] === "refs/heads/main"
+				) {
+					return { code: 0, stdout: "", stderr: "" };
 				}
 				if (args[0] === "diff" && args[1] === "main...feat/alpha") {
 					return {
@@ -4034,8 +4039,13 @@ test("resume_milestone reruns review after a blocked review validation", async (
 				) {
 					return { code: 0, stdout: "feat/alpha\n", stderr: "" };
 				}
-				if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "main") {
-					return { code: 0, stdout: "main\n", stderr: "" };
+				if (
+					args[0] === "show-ref" &&
+					args[1] === "--verify" &&
+					args[2] === "--quiet" &&
+					args[3] === "refs/heads/main"
+				) {
+					return { code: 0, stdout: "", stderr: "" };
 				}
 				if (args[0] === "diff" && args[1] === "main...feat/alpha") {
 					return { code: 0, stdout: "diff --git a/file.ts b/file.ts\n+const value = 1;\n", stderr: "" };
