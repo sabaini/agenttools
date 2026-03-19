@@ -445,7 +445,9 @@ function buildPrompt(options: {
 	return (
 		"Please analyze this GitHub Actions failure. Provide a clear root-cause analysis with evidence, " +
 		"then list practical options for fixing (short-term and long-term). " +
-		"Do not run commands or make changes unless I ask. If more info is needed, say what to gather.\n\n" +
+		"Do not make changes unless I ask, but it is okay (and often necessary) to run read-only " +
+		"inspection commands to retrieve additional evidence such as raw logs and workflow files. " +
+		"If more info is needed, say what to gather.\n\n" +
 		metadata.join("\n") +
 		"\n\n" +
 		artifactSection +
