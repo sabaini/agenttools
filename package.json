@@ -8,6 +8,7 @@
   "files": [
     "pi-extensions/",
     "pi-prompts/",
+    "skills/",
     "docs/",
     "README.md",
     "package.json"
@@ -15,6 +16,9 @@
   "pi": {
     "extensions": [
       "./pi-extensions"
+    ],
+    "skills": [
+      "./skills"
     ],
     "prompts": [
       "./pi-prompts"

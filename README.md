@@ -35,11 +35,12 @@ You can load it explicitly with `pi -e ./pi-extensions/planner-workflow.ts`.
 This repository is also a local pi package. It exposes:
 
 - extensions from `pi-extensions/`
+- skills from `skills/`
 - prompt templates from `pi-prompts/`
 
 Packaging note:
 
-- keep `package.json` manifest entries directory-based (`./pi-extensions`, `./pi-prompts`), not glob-only
+- keep `package.json` manifest entries directory-based (`./pi-extensions`, `./skills`, `./pi-prompts`), not glob-only
 - this is important for local-package mode: directory entries reliably load nested extension entrypoints like `pi-extensions/review/index.ts`
 - with glob-only manifest entries, pi may still show the package in `pi list` while commands such as `/review` are missing because the package resources were not actually registered
 - after changing package resources, run `/reload`
