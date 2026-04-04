@@ -108,23 +108,32 @@ async function loadPromptBody(filePath: string): Promise<string> {
 	return prompt;
 }
 
+function getCommandPath(command: {
+	sourceInfo?: { path?: string };
+	path?: string;
+}): string | undefined {
+	return command.sourceInfo?.path ?? command.path;
+}
+
 async function loadReviewTypesFromCommands(pi: ExtensionAPI): Promise<ReviewType[]> {
 	const commands = pi.getCommands();
 	const templates = commands.filter(
 		(command) =>
 			command.source === "prompt" &&
 			command.name.startsWith(REVIEW_PREFIX) &&
-			Boolean(command.path),
+			Boolean(getCommandPath(command)),
 	);
 
 	const reviews: ReviewType[] = [];
 	for (const template of templates) {
-		const prompt = await loadPromptBody(template.path!);
+		const templatePath = getCommandPath(template);
+		if (!templatePath) continue;
+		const prompt = await loadPromptBody(templatePath);
 		reviews.push({
 			id: template.name,
 			label: toReviewLabel(template.name),
 			prompt,
-			path: template.path,
+			path: templatePath,
 		});
 	}
 

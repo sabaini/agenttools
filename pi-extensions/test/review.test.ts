@@ -46,7 +46,18 @@ test("prepareReviewRequest builds a deterministic branch review packet", async (
 
 		const pi = {
 			getCommands() {
-				return [{ source: "prompt", name: "review-correctness", path: promptPath }];
+				return [
+					{
+						source: "prompt",
+						name: "review-correctness",
+						sourceInfo: {
+							path: promptPath,
+							source: "test",
+							scope: "project",
+							origin: "top-level",
+						},
+					},
+				];
 			},
 			async exec(command: string, args: string[]) {
 				assert.equal(command, "git");
