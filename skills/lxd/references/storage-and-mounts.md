@@ -6,7 +6,7 @@
 lxc config device add c-<name> host-src disk source=/srv/projects path=/mnt/projects readonly=true
 ```
 
-Writable mount (only when explicitly requested):
+Writable mount
 
 ```bash
 lxc config device add c-<name> host-rw disk source=/srv/data path=/mnt/data
@@ -14,14 +14,14 @@ lxc config device add c-<name> host-rw disk source=/srv/data path=/mnt/data
 
 Same device pattern works for VMs.
 
-## Managed storage volumes (preferred for persistent app data)
+## Managed storage volumes
 
-Pick a storage pool explicitly (do not assume `default` exists in all environments):
+VMs only, not supported by containers.
 
 ```bash
 lxc storage list
-lxc storage volume create <pool> app-data size=20GiB
-lxc config device add c-<name> app-data disk pool=<pool> source=app-data path=/var/lib/app
+lxc storage volume create --type block default data1 size=8GiB
+lxc storage volume attach default data1 vm-<name>
 ```
 
 ## File transfer pattern (one-off artifacts)
@@ -33,8 +33,3 @@ lxc file pull c-dev/etc/os-release ./os-release.c-dev
 
 Use `lxc file push/pull` for point-in-time transfer; use disk devices/profiles for ongoing shared data.
 
-## Safety notes
-
-- Avoid mounting sensitive host paths (`/`, `/etc`, `/var/lib/lxd`, SSH key dirs).
-- Prefer dedicated host directories with narrow permissions.
-- If multiple instances need the same mount, define it once in a profile.

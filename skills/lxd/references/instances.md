@@ -2,7 +2,9 @@
 
 ## Preferred lifecycle pattern
 
-Use explicit provisioning for reproducibility:
+Use explicit provisioning for reproducibility.
+
+Containers:
 
 ```bash
 lxc init ubuntu:24.04 c-<name> --profile default
@@ -63,4 +65,9 @@ lxc exec c-<name> -- sh -c "<command>"
 lxc exec vm-<name> -- sh -c "<command>"
 ```
 
-Quote carefully when passing variables through `sh -c`.
+Quote carefully when passing variables through `sh -c`. To avoid quoting issues transfer scripts and exec:
+
+```bash
+lxc file push ./script.sh c-dev/mnt
+lxc exec vm-<name> -- sh /mnt/script.sh
+```
