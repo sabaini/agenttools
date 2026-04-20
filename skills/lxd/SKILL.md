@@ -40,6 +40,7 @@ If `ubuntu:24.04` is unavailable, try `ubuntu:noble` and then `ubuntu:lts`, and 
 
 - Prefer `init` → `config` → `start` for repeatable provisioning.
 - Use idempotent checks (`show/list` before `create`) in scripts/automation.
+- `lxc profile create <name>` can hang waiting for stdin; if you are not piping profile YAML/content into it, redirect stdin from `/dev/null` (for example, `lxc profile create <name> </dev/null`).
 - Validate after changes (`lxc list`, `lxc info <instance>`, guest-level checks).
 - Summarize assumptions and non-default settings clearly.
 

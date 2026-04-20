@@ -2,10 +2,12 @@
 
 ## Profiles: compose small, reusable units
 
+If you are not piping profile YAML/content into `lxc profile create`, redirect stdin from `/dev/null`; otherwise the command can hang waiting for stdin.
+
 Compute profile:
 
 ```bash
-lxc profile show compute-small >/dev/null 2>&1 || lxc profile create compute-small
+lxc profile show compute-small >/dev/null 2>&1 || lxc profile create compute-small </dev/null
 lxc profile set compute-small limits.cpu 2
 lxc profile set compute-small limits.memory 4GiB
 ```
@@ -13,7 +15,7 @@ lxc profile set compute-small limits.memory 4GiB
 Shared mount profile:
 
 ```bash
-lxc profile show mount-projects >/dev/null 2>&1 || lxc profile create mount-projects
+lxc profile show mount-projects >/dev/null 2>&1 || lxc profile create mount-projects </dev/null
 lxc profile device list mount-projects | grep -qx projects || \
   lxc profile device add mount-projects projects disk source=/srv/projects path=/mnt/projects readonly=true
 ```
@@ -35,7 +37,7 @@ lxc profile assign c-dev default,compute-small,mount-projects
 
 ```bash
 lxc network show br-dev >/dev/null 2>&1 || lxc network create br-dev ipv4.address=10.77.0.1/24 ipv4.nat=true ipv6.address=none
-lxc profile show net-br-dev >/dev/null 2>&1 || lxc profile create net-br-dev
+lxc profile show net-br-dev >/dev/null 2>&1 || lxc profile create net-br-dev </dev/null
 lxc profile device list net-br-dev | grep -qx eth0 || \
   lxc profile device add net-br-dev eth0 nic network=br-dev name=eth0
 ```

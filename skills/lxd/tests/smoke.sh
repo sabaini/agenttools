@@ -294,12 +294,12 @@ main() {
   [[ -f "$HOST_DIR/data/write-ok" ]] || die "rw mount write did not appear on host"
 
   log "Profiles"
-  lxc profile show "$compute_profile" >/dev/null 2>&1 || lxc profile create "$compute_profile"
+  lxc profile show "$compute_profile" >/dev/null 2>&1 || lxc profile create "$compute_profile" </dev/null
   add_profile "$compute_profile"
   lxc profile set "$compute_profile" limits.cpu 2
   lxc profile set "$compute_profile" limits.memory 4GiB
 
-  lxc profile show "$mount_profile" >/dev/null 2>&1 || lxc profile create "$mount_profile"
+  lxc profile show "$mount_profile" >/dev/null 2>&1 || lxc profile create "$mount_profile" </dev/null
   add_profile "$mount_profile"
   if ! lxc profile device list "$mount_profile" | grep -qx projects; then
     lxc profile device add "$mount_profile" projects disk source="$HOST_DIR/projects" path=/mnt/projects readonly=true
@@ -317,7 +317,7 @@ main() {
     lxc network create "$network" ipv4.address="$subnet" ipv4.nat=true ipv6.address=none
   add_network "$network"
 
-  lxc profile show "$net_profile" >/dev/null 2>&1 || lxc profile create "$net_profile"
+  lxc profile show "$net_profile" >/dev/null 2>&1 || lxc profile create "$net_profile" </dev/null
   add_profile "$net_profile"
   if ! lxc profile device list "$net_profile" | grep -qx eth0; then
     lxc profile device add "$net_profile" eth0 nic network="$network" name=eth0
