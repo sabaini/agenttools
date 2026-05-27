@@ -8,14 +8,11 @@ compatibility: Linux host with LXD/LXC CLI access (tested on LXD 5.x+).
 
 Use this skill for LXD/LXC tasks.
 
-Keep context lean: load only the topic file needed for the user request.
-
 ## Defaults and guardrails
 
-- Default image for both containers and VMs: `ubuntu:24.04`.
+- Default image for both containers and VMs: `ubuntu:26.04`.
 - Prefer containers unless the user explicitly asks for a VM, or needs virtualized devices (for example, storage devices).
 - Prefer reusable profiles and managed storage volumes over one-off instance tweaks.
-- For host-path mounts, default to `readonly=true` unless write access is requested.
 - Do not delete or reconfigure existing instances, networks, or profiles unless asked.
 - Avoid `security.privileged`, `security.nesting`, and `raw.lxc` unless explicitly required.
 
@@ -24,24 +21,25 @@ Keep context lean: load only the topic file needed for the user request.
 ```bash
 lxc info >/dev/null
 lxc remote list --format=table
-lxc image info ubuntu:24.04
+lxc image info ubuntu:26.04
 ```
 
-If `ubuntu:24.04` is unavailable, try `ubuntu:noble` and then `ubuntu:lts`, and report what was used.
-
-## Load only the relevant topic
+## Topics
 
 - Instance bring-up and readiness: [references/instances.md](references/instances.md)
 - Host mounts and managed volumes: [references/storage-and-mounts.md](references/storage-and-mounts.md)
 - Profiles and networks: [references/profiles-and-networks.md](references/profiles-and-networks.md)
-- Device-heavy privileged test labs (high risk): [references/advanced-labs.md](references/advanced-labs.md)
+- Troubleshooting hanging commands: [references/troubleshooting.md](references/troubleshooting.md)
 
 ## Execution style
 
 - Prefer `init` → `config` → `start` for repeatable provisioning.
 - Use idempotent checks (`show/list` before `create`) in scripts/automation.
+- `lxc profile create <name>` can hang waiting for stdin; if you are not piping profile YAML/content into it, redirect stdin from `/dev/null` (for example, `lxc profile create <name> </dev/null`).
+- Important: in non-interactive shells, CI, or SSH/Testflinger-style runners, `lxc init`, `lxc launch`, and `lxc storage volume create` can also inherit stdin and block waiting for EOF; if you are not intentionally feeding them input, redirect stdin from `/dev/null`. Also see troubleshooting hanging commands.
 - Validate after changes (`lxc list`, `lxc info <instance>`, guest-level checks).
 - Summarize assumptions and non-default settings clearly.
+
 
 ## Validate the documented commands
 
