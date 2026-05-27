@@ -7,7 +7,7 @@ Use explicit provisioning for reproducibility.
 Containers:
 
 ```bash
-lxc init ubuntu:24.04 c-<name> --profile default
+lxc init ubuntu:26.04 c-<name> --profile default </dev/null
 lxc config set c-<name> limits.cpu 2
 lxc config set c-<name> limits.memory 4GiB
 lxc start c-<name>
@@ -16,7 +16,7 @@ lxc start c-<name>
 VM variant:
 
 ```bash
-lxc init ubuntu:24.04 vm-<name> --vm --profile default
+lxc init ubuntu:26.04 vm-<name> --vm --profile default </dev/null
 lxc config set vm-<name> limits.cpu 4
 lxc config set vm-<name> limits.memory 8GiB
 lxc config device override vm-<name> root size=40GiB
@@ -28,8 +28,17 @@ lxc start vm-<name>
 For simple one-offs:
 
 ```bash
-lxc launch ubuntu:24.04 c-quick --profile default
-lxc launch ubuntu:24.04 vm-quick --vm --profile default
+lxc launch ubuntu:26.04 c-quick --profile default
+lxc launch ubuntu:26.04 vm-quick --vm --profile default
+```
+
+In scripts, CI, or remote runners, prefer detaching `lxc launch` from the parent stdin so it cannot hang waiting for EOF. See also [Troubleshooting](troubleshooting.md).
+
+Why this matters: the failure mode is confusing — `lxc init`/`lxc launch` can stay running while blocked on inherited stdin, but `lxc list` and `lxc info <name>` may still show no instance because LXD has not started creating it yet.
+
+```bash
+lxc launch ubuntu:26.04 c-quick --profile default </dev/null
+lxc launch ubuntu:26.04 vm-quick --vm --profile default </dev/null
 ```
 
 ## Readiness checks

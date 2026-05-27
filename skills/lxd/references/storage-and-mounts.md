@@ -18,9 +18,13 @@ Same device pattern works for VMs.
 
 VMs only, not supported by containers.
 
+In scripts, CI, or remote runners, prefer detaching `lxc storage volume create` from the parent stdin with `</dev/null`. See also [Troubleshooting](troubleshooting.md).
+
+Why this matters: `lxc storage volume create` can look hung while blocked on inherited stdin, and `lxc storage volume show <pool> <name>` may still show no volume because creation has not started yet.
+
 ```bash
 lxc storage list
-lxc storage volume create --type block default data1 size=8GiB
+lxc storage volume create --type block default data1 size=8GiB </dev/null
 lxc storage volume attach default data1 vm-<name>
 ```
 

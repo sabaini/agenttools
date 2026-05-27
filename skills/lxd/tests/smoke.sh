@@ -222,7 +222,7 @@ main() {
   local subnet="${subnet_prefix}.1/24"
 
   log "Container init -> config -> start"
-  lxc init "$IMAGE" "$c_init" --profile default
+  lxc init "$IMAGE" "$c_init" --profile default </dev/null
   add_instance "$c_init"
   lxc config set "$c_init" limits.cpu 2
   lxc config set "$c_init" limits.memory 4GiB
@@ -232,7 +232,7 @@ main() {
   lxc exec "$c_init" -- sh -c 'echo ok >/tmp/smoke-check && test -f /tmp/smoke-check'
 
   log "VM init -> config -> start"
-  if lxc init "$IMAGE" "$vm_init" --vm --profile default; then
+  if lxc init "$IMAGE" "$vm_init" --vm --profile default </dev/null; then
     add_instance "$vm_init"
     if lxc config set "$vm_init" limits.cpu 2 && \
        lxc config set "$vm_init" limits.memory 4GiB && \
@@ -261,13 +261,13 @@ main() {
   fi
 
   log "Quick launch pattern"
-  lxc launch "$IMAGE" "$c_quick" --profile default
+  lxc launch "$IMAGE" "$c_quick" --profile default </dev/null
   add_instance "$c_quick"
   wait_exec "$c_quick" 60 2
   wait_cloud_init_container "$c_quick"
 
   if [[ "$VM_OK" -eq 1 ]]; then
-    lxc launch "$IMAGE" "$vm_quick" --vm --profile default
+    lxc launch "$IMAGE" "$vm_quick" --vm --profile default </dev/null
     add_instance "$vm_quick"
     wait_cloud_init_vm "$vm_quick"
   fi
@@ -276,7 +276,7 @@ main() {
   lxc config device add "$c_init" host-src disk source="$HOST_DIR/projects" path=/mnt/projects readonly=true
   lxc config device add "$c_init" host-rw disk source="$HOST_DIR/data" path=/mnt/data
 
-  lxc storage volume create "$POOL" "$volume" size=1GiB
+  lxc storage volume create "$POOL" "$volume" size=1GiB </dev/null
   add_volume "$POOL/$volume"
   lxc config device add "$c_init" app-data disk pool="$POOL" source="$volume" path=/var/lib/app
 
@@ -306,7 +306,7 @@ main() {
   fi
 
   log "Launch with composed profiles + profile assign"
-  lxc launch "$IMAGE" "$c_dev" --profile default --profile "$compute_profile" --profile "$mount_profile"
+  lxc launch "$IMAGE" "$c_dev" --profile default --profile "$compute_profile" --profile "$mount_profile" </dev/null
   add_instance "$c_dev"
   wait_exec "$c_dev" 60 2
   wait_cloud_init_container "$c_dev"
@@ -323,7 +323,7 @@ main() {
     lxc profile device add "$net_profile" eth0 nic network="$network" name=eth0
   fi
 
-  lxc launch "$IMAGE" "$c_net" --profile default --profile "$net_profile"
+  lxc launch "$IMAGE" "$c_net" --profile default --profile "$net_profile" </dev/null
   add_instance "$c_net"
   wait_exec "$c_net" 60 2
   wait_cloud_init_container "$c_net"
@@ -339,7 +339,7 @@ main() {
 
   if [[ "$VM_OK" -eq 1 ]]; then
     log "VM network/mount parity checks"
-    lxc launch "$IMAGE" "$vm_net" --vm --profile default --profile "$net_profile"
+    lxc launch "$IMAGE" "$vm_net" --vm --profile default --profile "$net_profile" </dev/null
     add_instance "$vm_net"
     lxc config device add "$vm_net" host-src disk source="$HOST_DIR/projects" path=/mnt/projects readonly=true
     lxc config device override "$vm_net" eth0 ipv4.address="${subnet_prefix}.11"
@@ -347,7 +347,7 @@ main() {
   fi
 
   log "Advanced privileged container pattern"
-  lxc init "$IMAGE" "$c_adv" --profile default
+  lxc init "$IMAGE" "$c_adv" --profile default </dev/null
   add_instance "$c_adv"
   lxc config set "$c_adv" security.privileged true
   lxc config set "$c_adv" security.nesting true
