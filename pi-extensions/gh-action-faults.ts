@@ -66,6 +66,81 @@ function getRunId(run: RunSummary): number | null {
 	return run.databaseId ?? run.id ?? null;
 }
 
+function normalizeRepoName(value?: string): string | null {
+	const trimmed = value?.trim();
+	if (!trimmed) return null;
+	const withoutProtocol = trimmed.replace(/^https?:\/\/github\.com\//, "");
+	const withoutHost = withoutProtocol.replace(/^github\.com\//, "");
+	const match = withoutHost.match(
+		/^([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9._-]+?)(?:\.git)?\/?$/,
+	);
+	return match ? `${match[1]}/${match[2]}` : null;
+}
+
+function parseGitHubRepoFromRemote(url: string): string | null {
+	const trimmed = url.trim();
+	const patterns = [
+		/^git@github\.com:([^/]+)\/([^/#?]+?)(?:\.git)?(?:[#?].*)?$/,
+		/^ssh:\/\/git@github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?(?:[#?].*)?$/,
+		/^https?:\/\/github\.com\/([^/]+)\/([^/#?]+?)(?:\.git)?(?:[#?].*)?$/,
+		/^github\.com[:/]([^/]+)\/([^/#?]+?)(?:\.git)?(?:[#?].*)?$/,
+	];
+	for (const pattern of patterns) {
+		const match = trimmed.match(pattern);
+		if (match) return `${match[1]}/${match[2]}`;
+	}
+	return null;
+}
+
+function addUniqueRepo(candidates: string[], repo: string | null): void {
+	if (repo && !candidates.includes(repo)) candidates.push(repo);
+}
+
+async function getRemoteRepoCandidates(pi: ExtensionAPI, repoPath: string): Promise<string[]> {
+	const remotes = await pi.exec("git", ["remote"], { cwd: repoPath });
+	if (remotes.code !== 0) return [];
+
+	const remoteNames = remotes.stdout
+		.split("\n")
+		.map((remote) => remote.trim())
+		.filter(Boolean);
+	const orderedRemoteNames = [
+		...remoteNames.filter((remote) => remote === "upstream"),
+		...remoteNames.filter((remote) => remote === "origin"),
+		...remoteNames.filter((remote) => remote !== "upstream" && remote !== "origin"),
+	];
+
+	const candidates: string[] = [];
+	for (const remote of orderedRemoteNames) {
+		const url = await pi.exec("git", ["remote", "get-url", remote], { cwd: repoPath });
+		if (url.code === 0) addUniqueRepo(candidates, parseGitHubRepoFromRemote(url.stdout));
+	}
+	return candidates;
+}
+
+async function viewRepo(
+	pi: ExtensionAPI,
+	repoPath: string,
+	repoName?: string,
+): Promise<{ info: RepoInfo | null; error?: string }> {
+	const args = repoName
+		? ["repo", "view", repoName, "--json", "nameWithOwner,url"]
+		: ["repo", "view", "--json", "nameWithOwner,url"];
+	const result = await pi.exec("gh", args, { cwd: repoPath });
+	if (result.code !== 0) {
+		return { info: null, error: result.stderr.trim() || result.stdout.trim() };
+	}
+	try {
+		return { info: JSON.parse(result.stdout) as RepoInfo };
+	} catch (error) {
+		return { info: null, error: `Failed to parse gh repo view output: ${String(error)}` };
+	}
+}
+
+function withRepo(args: string[], repoName: string | undefined): string[] {
+	return repoName ? [...args, "--repo", repoName] : args;
+}
+
 function getJobId(job: JobSummary): number | null {
 	return job.id ?? null;
 }
@@ -161,31 +236,58 @@ async function ensureGhAuth(pi: ExtensionAPI, repoPath: string): Promise<boolean
 	}
 }
 
-async function getRepoInfo(pi: ExtensionAPI, repoPath: string): Promise<RepoInfo | null> {
-	const result = await pi.exec("gh", ["repo", "view", "--json", "nameWithOwner,url"], {
-		cwd: repoPath,
-	});
-	if (result.code !== 0) return null;
-	try {
-		return JSON.parse(result.stdout) as RepoInfo;
-	} catch {
-		return null;
+async function getRepoInfo(
+	pi: ExtensionAPI,
+	repoPath: string,
+	requestedRepo?: string | null,
+): Promise<RepoInfo | null> {
+	if (requestedRepo) {
+		// If the user explicitly named a repository, do not silently fall back to a
+		// remote. Falling back can make the run picker show failures from a fork,
+		// which is very confusing when comparing with `gh run list --repo ...`.
+		const { info, error } = await viewRepo(pi, repoPath, requestedRepo);
+		if (!info?.nameWithOwner && error) {
+			throw new Error(
+				`Unable to resolve GitHub repository '${requestedRepo}' with gh: ${error}`,
+			);
+		}
+		return info;
 	}
+
+	const candidates: string[] = [];
+	addUniqueRepo(candidates, normalizeRepoName(process.env.GH_REPO));
+	for (const candidate of await getRemoteRepoCandidates(pi, repoPath)) {
+		addUniqueRepo(candidates, candidate);
+	}
+
+	for (const candidate of candidates) {
+		const { info } = await viewRepo(pi, repoPath, candidate);
+		if (info?.nameWithOwner) return info;
+	}
+
+	return (await viewRepo(pi, repoPath)).info;
 }
 
-async function listFailedRuns(pi: ExtensionAPI, repoPath: string): Promise<RunSummary[]> {
+async function listFailedRuns(
+	pi: ExtensionAPI,
+	repoPath: string,
+	repoName?: string,
+): Promise<RunSummary[]> {
 	const result = await pi.exec(
 		"gh",
-		[
-			"run",
-			"list",
-			"--status",
-			"failure",
-			"--limit",
-			String(RUN_LIMIT),
-			"--json",
-			"databaseId,displayTitle,workflowName,headBranch,event,createdAt,updatedAt,conclusion,headSha",
-		],
+		withRepo(
+			[
+				"run",
+				"list",
+				"--status",
+				"failure",
+				"--limit",
+				String(RUN_LIMIT),
+				"--json",
+				"databaseId,displayTitle,workflowName,headBranch,event,createdAt,updatedAt,conclusion,headSha",
+			],
+			repoName,
+		),
 		{ cwd: repoPath },
 	);
 	if (result.code !== 0) {
@@ -199,16 +301,20 @@ async function getRunDetails(
 	pi: ExtensionAPI,
 	repoPath: string,
 	runId: number,
+	repoName?: string,
 ): Promise<RunDetails | null> {
 	const result = await pi.exec(
 		"gh",
-		[
-			"run",
-			"view",
-			String(runId),
-			"--json",
-			"databaseId,displayTitle,workflowName,headBranch,event,createdAt,updatedAt,conclusion,headSha,status,url,runAttempt,runNumber",
-		],
+		withRepo(
+			[
+				"run",
+				"view",
+				String(runId),
+				"--json",
+				"databaseId,displayTitle,workflowName,headBranch,event,createdAt,updatedAt,conclusion,headSha,status,url,runAttempt,runNumber",
+			],
+			repoName,
+		),
 		{ cwd: repoPath },
 	);
 	if (result.code !== 0) return null;
@@ -266,34 +372,51 @@ async function getRunLogs(
 	repoPath: string,
 	runId: number,
 	jobId?: number,
+	repoName?: string,
 ): Promise<string> {
 	if (jobId) {
-		const failed = await pi.exec("gh", ["run", "view", "--job", String(jobId), "--log-failed"], {
-			cwd: repoPath,
-		});
+		const failed = await pi.exec(
+			"gh",
+			withRepo(["run", "view", "--job", String(jobId), "--log-failed"], repoName),
+			{
+				cwd: repoPath,
+			},
+		);
 		if (failed.code === 0 && failed.stdout.trim()) {
 			return failed.stdout;
 		}
 
-		const full = await pi.exec("gh", ["run", "view", "--job", String(jobId), "--log"], {
-			cwd: repoPath,
-		});
+		const full = await pi.exec(
+			"gh",
+			withRepo(["run", "view", "--job", String(jobId), "--log"], repoName),
+			{
+				cwd: repoPath,
+			},
+		);
 		if (full.code !== 0) {
 			throw new Error(full.stderr.trim() || "Failed to fetch GitHub Actions job logs");
 		}
 		return full.stdout;
 	}
 
-	const failed = await pi.exec("gh", ["run", "view", String(runId), "--log-failed"], {
-		cwd: repoPath,
-	});
+	const failed = await pi.exec(
+		"gh",
+		withRepo(["run", "view", String(runId), "--log-failed"], repoName),
+		{
+			cwd: repoPath,
+		},
+	);
 	if (failed.code === 0 && failed.stdout.trim()) {
 		return failed.stdout;
 	}
 
-	const full = await pi.exec("gh", ["run", "view", String(runId), "--log"], {
-		cwd: repoPath,
-	});
+	const full = await pi.exec(
+		"gh",
+		withRepo(["run", "view", String(runId), "--log"], repoName),
+		{
+			cwd: repoPath,
+		},
+	);
 	if (full.code !== 0) {
 		throw new Error(full.stderr.trim() || "Failed to fetch GitHub Actions logs");
 	}
@@ -307,9 +430,13 @@ async function getArtifacts(
 	runId?: number,
 ): Promise<ArtifactInfo[]> {
 	if (!runId) return [];
-	const direct = await pi.exec("gh", ["run", "view", String(runId), "--json", "artifacts"], {
-		cwd: repoPath,
-	});
+	const direct = await pi.exec(
+		"gh",
+		withRepo(["run", "view", String(runId), "--json", "artifacts"], repoName),
+		{
+			cwd: repoPath,
+		},
+	);
 	if (direct.code === 0) {
 		try {
 			const data = JSON.parse(direct.stdout) as { artifacts?: ArtifactInfo[] };
@@ -345,12 +472,13 @@ async function downloadArtifacts(
 	repoPath: string,
 	runId: number,
 	artifacts: ArtifactInfo[],
+	repoName?: string,
 ): Promise<{ directory?: string; error?: string }> {
 	if (artifacts.length === 0) return {};
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), `pi-gh-faults-${runId}-`));
 	const result = await pi.exec(
 		"gh",
-		["run", "download", String(runId), "--dir", dir],
+		withRepo(["run", "download", String(runId), "--dir", dir], repoName),
 		{ cwd: repoPath },
 	);
 	if (result.code !== 0) {
@@ -469,7 +597,19 @@ export default function ghActionFaultsExtension(pi: ExtensionAPI) {
 
 			ctx.ui.setStatus("gh-faults", "Checking repository…");
 			try {
-				let repoPath = await ensureRepoPath(pi, ctx.cwd, args);
+				let requestedRepo = normalizeRepoName(args);
+				let repoPath: string | null;
+				if (requestedRepo && args?.trim()) {
+					const explicitPath = await ensureRepoPath(pi, ctx.cwd, args);
+					if (explicitPath) {
+						repoPath = explicitPath;
+						requestedRepo = null;
+					} else {
+						repoPath = await ensureRepoPath(pi, ctx.cwd);
+					}
+				} else {
+					repoPath = await ensureRepoPath(pi, ctx.cwd, args);
+				}
 				if (!repoPath) {
 					repoPath = await promptForRepoPath(pi, ctx);
 				}
@@ -486,7 +626,7 @@ export default function ghActionFaultsExtension(pi: ExtensionAPI) {
 				}
 
 				ctx.ui.setStatus("gh-faults", "Loading repository info…");
-				const repoInfo = await getRepoInfo(pi, repoPath);
+				const repoInfo = await getRepoInfo(pi, repoPath, requestedRepo);
 				if (!repoInfo?.nameWithOwner) {
 					ctx.ui.setStatus("gh-faults", undefined);
 					ctx.ui.notify("Unable to resolve GitHub repository. Is this a GitHub repo?", "error");
@@ -494,7 +634,7 @@ export default function ghActionFaultsExtension(pi: ExtensionAPI) {
 				}
 
 				ctx.ui.setStatus("gh-faults", "Fetching failed runs…");
-				const runs = await listFailedRuns(pi, repoPath);
+				const runs = await listFailedRuns(pi, repoPath, repoInfo.nameWithOwner);
 				if (runs.length === 0) {
 					ctx.ui.setStatus("gh-faults", undefined);
 					ctx.ui.notify("No failed runs found.", "info");
@@ -515,7 +655,7 @@ export default function ghActionFaultsExtension(pi: ExtensionAPI) {
 				}
 
 				ctx.ui.setStatus("gh-faults", "Fetching run details…");
-				const runDetails = await getRunDetails(pi, repoPath, runId);
+				const runDetails = await getRunDetails(pi, repoPath, runId, repoInfo.nameWithOwner);
 
 				ctx.ui.setStatus("gh-faults", "Fetching jobs…");
 				const jobs = await listRunJobs(pi, repoPath, repoInfo.nameWithOwner, runId);
@@ -550,7 +690,13 @@ export default function ghActionFaultsExtension(pi: ExtensionAPI) {
 					"gh-faults",
 					selectedJob ? "Fetching job logs…" : "Fetching logs…",
 				);
-				const logs = await getRunLogs(pi, repoPath, runId, selectedJobId ?? undefined);
+				const logs = await getRunLogs(
+					pi,
+					repoPath,
+					runId,
+					selectedJobId ?? undefined,
+					repoInfo.nameWithOwner,
+				);
 				const logSummary = await summarizeLogs(selectedJobId ?? runId, logs);
 
 				ctx.ui.setStatus("gh-faults", "Checking artifacts…");
@@ -559,7 +705,13 @@ export default function ghActionFaultsExtension(pi: ExtensionAPI) {
 				let artifactError: string | undefined;
 				if (artifacts.length > 0) {
 					ctx.ui.setStatus("gh-faults", "Downloading artifacts…");
-					const download = await downloadArtifacts(pi, repoPath, runId, artifacts);
+					const download = await downloadArtifacts(
+						pi,
+						repoPath,
+						runId,
+						artifacts,
+						repoInfo.nameWithOwner,
+					);
 					artifactsDir = download.directory;
 					artifactError = download.error;
 				}
