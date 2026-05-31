@@ -8,6 +8,7 @@ This package currently exposes these pi commands:
 
 - `/review`
 - `/specwriter`
+- `/spectorator`
 - `/gh-faults`
 
 It also exposes review prompt templates from `pi-prompts/` and shared skills from `skills/`.
@@ -27,7 +28,7 @@ Packaging note:
 - with glob-only manifest entries, pi may still show the package in `pi list` while commands such as `/review` are missing because the package resources were not actually registered
 - after changing package resources, run `/reload`
 
-Install it globally so commands like `/review`, `/specwriter`, and `/gh-faults` are available in every project:
+Install it globally so commands like `/review`, `/specwriter`, `/spectorator`, and `/gh-faults` are available in every project:
 
 ```bash
 pi install /home/ubuntu/src/agenttools
@@ -38,6 +39,21 @@ Then reload pi resources:
 ```text
 /reload
 ```
+
+## Spectorator extension
+
+`/spectorator` creates a fixed-format markdown spec skeleton, asks the agent to fill it in, and then opens a Plannotator-powered browser review gate through the `spectorator_review_spec` tool. Feedback and annotations are returned to the agent for another edit/review cycle until the spec is approved.
+
+Spec files default to `~/data/specs`; set `SPECTORATOR_DIR` to override the directory.
+
+Examples:
+
+```text
+/spectorator add browser review for specs
+/spectorator --title "Spectorator" --path specs/spectorator.md create a spec creation/review extension
+```
+
+`/specwriter` remains useful for improving an existing spec draft.
 
 ## Review extension
 
