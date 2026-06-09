@@ -35,6 +35,7 @@ If `cephtools` is unavailable but `testflinger` is present, use the raw CLI work
 ## Load only the relevant topic
 
 - Reserve a machine and connect: [references/reserve-and-connect.md](references/reserve-and-connect.md)
+- Long authenticated reservations: [references/long-reservations.md](references/long-reservations.md)
 - Bootstrap and work on the reserved host: [references/bootstrap.md](references/bootstrap.md)
 - Troubleshooting and reservation management: [references/troubleshooting.md](references/troubleshooting.md)
 
