@@ -48,13 +48,3 @@ testflinger cancel <job-id>
 
 If the wrapper printed a cancel command, prefer using that exact command.
 
-## Useful facts to preserve in notes
-
-Keep these details in your final summary so the user can continue from there if needed:
-
-- queue name
-- job id
-- expiration time
-- SSH command or IP
-- whether the machine was reachable over SSH
-- any tools you installed

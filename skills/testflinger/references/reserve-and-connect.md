@@ -15,13 +15,6 @@ command -v cephtools || true
 command -v testflinger || command -v testflinger-cli
 ```
 
-If you need to inspect queues first:
-
-```bash
-testflinger list-queues
-# or machine-readable output
-testflinger list-queues --json
-```
 
 ## Preferred reservation path: cephtools wrapper
 
@@ -58,7 +51,7 @@ If `cephtools` is unavailable, reserve directly with Testflinger:
 testflinger reserve --queue <queue-name>
 ```
 
-The default deployment is Ubuntu 24.04. Only pass an explicit image if the user requests a different OS and you know the correct image identifier for that lab.
+The default deployment is Ubuntu 26.04. Only pass an explicit image if the user requests a different OS and you know the correct image identifier for that lab.
 
 You can also provide SSH keys explicitly:
 

@@ -16,7 +16,7 @@ Keep context lean: load only the topic file needed for the request.
 - Check VPN reachability before reserving or connecting: `ping -c 1 -W 1 10.172.192.1`.
 - If the VPN check fails, stop and tell the user the lab is unreachable until VPN access is restored.
 - Physical deployments are slow. Reservation and provisioning can take up to 20 minutes; do not treat a long wait as failure by itself.
-- Default OS is Ubuntu 24.04 unless the user explicitly requests something else.
+- Default OS is Ubuntu 26.04 unless the user explicitly requests something else.
 - Reservations produce fresh machines. It is fine to install tools, clone repos, and make disposable changes on the host.
 - SSH user is `ubuntu`; passwordless sudo is available.
 - Keep the final reservation details: queue name, job id, expiration time, SSH command, and cancel command.
