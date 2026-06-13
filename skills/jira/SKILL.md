@@ -1,6 +1,6 @@
 ---
 name: jira
-description: Use the local jira CLI for Jira Cloud work: list/search/view CEPH issues, inspect boards/sprints, and carefully create/comment/update tickets.
+description: Use the local jira CLI for Jira Cloud work, list/search/view CEPH issues, inspect boards/sprints, and carefully create/comment/update tickets.
 metadata:
   openclaw:
     requires:
