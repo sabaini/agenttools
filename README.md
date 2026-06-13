@@ -59,6 +59,8 @@ Examples:
 
 The review extension also registers a shared `prepare_review` tool. `/review` uses the same core review-preparation logic as the tool.
 
+Interactive `/review` prompts ask the agent to call `present_review` after writing the Markdown review. If the session has a GUI and Firefox is available, the tool renders a sibling `.html` file and opens it in Firefox. If not, behavior falls back to the existing Markdown summary/path response.
+
 Branch-scoped reviews accept any valid git ref (branch/tag/commit) for `base` and `head`. You can also pass a revision expression in `base` (for example `base..head`, `base...head`, or single-commit selectors like `abc123^!`) when using `/review` custom range mode or `prepare_review` branch scope.
 
 Examples:
