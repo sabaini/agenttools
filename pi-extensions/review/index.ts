@@ -11,6 +11,7 @@ import {
 	getCurrentBranch,
 	listOpenPrs,
 	loadReviewTypes,
+	presentReviewMarkdown,
 	prepareReviewRequest,
 	restoreSelection,
 	type PrInfo,
@@ -21,6 +22,7 @@ import {
 
 const STATUS_KEY = "review";
 const PREPARE_REVIEW_TOOL_NAME = "prepare_review";
+const PRESENT_REVIEW_TOOL_NAME = "present_review";
 
 const prepareReviewSchema = Type.Object({
 	scope: StringEnum(["working-tree", "branch", "repository", "pull-request"] as const),
@@ -34,6 +36,14 @@ const prepareReviewSchema = Type.Object({
 });
 
 type PrepareReviewToolParams = Static<typeof prepareReviewSchema>;
+
+const presentReviewSchema = Type.Object({
+	reviewPath: Type.String({
+		description: "Path to the Markdown review file to render and open in Firefox when a GUI is available.",
+	}),
+});
+
+type PresentReviewToolParams = Static<typeof presentReviewSchema>;
 
 function parseToolScope(params: PrepareReviewToolParams): ReviewScope {
 	switch (params.scope) {
@@ -94,6 +104,39 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					reviewInputTitle: prepared.reviewInputTitle,
 					scope: params.scope,
 				},
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: PRESENT_REVIEW_TOOL_NAME,
+		label: "Present Review",
+		description:
+			"Best-effort browser presentation for interactive /review results. " +
+			"Renders a Markdown review as HTML and opens it in Firefox only when this session has a UI, a GUI is available, and Firefox is installed.",
+		promptSnippet: "Present an interactive /review Markdown result in Firefox when explicitly requested by the review prompt.",
+		promptGuidelines: [
+			"Use this only when the current review prompt explicitly asks for browser presentation.",
+			"If presentation is unavailable, continue with the normal Markdown review summary/path response.",
+		],
+		parameters: presentReviewSchema,
+		async execute(_toolCallId, params: PresentReviewToolParams, _signal, _onUpdate, ctx) {
+			const result = await presentReviewMarkdown(pi, {
+				reviewPath: params.reviewPath,
+				cwd: typeof ctx?.cwd === "string" ? ctx.cwd : process.cwd(),
+				hasUI: ctx?.hasUI !== false,
+			});
+
+			return {
+				content: [
+					{
+						type: "text",
+						text: result.presented
+							? `Presented review in Firefox. Markdown: ${result.markdownPath}\nHTML: ${result.htmlPath}`
+							: `${result.message}\nMarkdown: ${result.markdownPath}`,
+					},
+				],
+				details: result,
 			};
 		},
 	});
@@ -178,6 +221,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 				const prepared = await prepareReviewRequest(pi, {
 					reviewIds: activeReviewIds,
 					scope: scopeChoice,
+					presentationToolName: PRESENT_REVIEW_TOOL_NAME,
 				});
 
 				if (ctx.isIdle()) {

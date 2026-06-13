@@ -1,8 +1,10 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { Marked, Renderer, type Tokens } from "marked";
 
 export const REVIEW_PREFIX = "review-";
 export const MAIN_BRANCH = "main";
@@ -62,6 +64,8 @@ export interface PrepareReviewRequestOptions {
 	reviewIds?: string[];
 	scope: ReviewScope;
 	outputPath?: string;
+	/** Internal: when set by interactive /review, ask the agent to present the finished Markdown with this tool. */
+	presentationToolName?: string;
 }
 
 export interface PreparedReviewRequest {
@@ -516,6 +520,327 @@ export function buildReviewOutputPath(branch: string): string {
 	return path.join(".pi", "reviews", `review-${stamp}-${safeBranch}.md`);
 }
 
+export type ReviewPresentationUnavailableReason =
+	| "no-ui"
+	| "no-gui"
+	| "firefox-not-found"
+	| "open-failed";
+
+export type ReviewBrowserAvailability =
+	| {
+		available: true;
+		firefoxCommand: string;
+	}
+	| {
+		available: false;
+		reason: Exclude<ReviewPresentationUnavailableReason, "open-failed">;
+		message: string;
+		triedCommands?: string[];
+	};
+
+export type PresentReviewResult =
+	| {
+		presented: true;
+		markdownPath: string;
+		htmlPath: string;
+		firefoxCommand: string;
+		message: string;
+	}
+	| {
+		presented: false;
+		reason: ReviewPresentationUnavailableReason;
+		markdownPath: string;
+		htmlPath?: string;
+		message: string;
+		triedCommands?: string[];
+	};
+
+export type ReviewBrowserOpener = (firefoxCommand: string, htmlPath: string) => Promise<void> | void;
+
+export function hasGraphicalEnvironment(
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+): boolean {
+	if (platform === "linux") {
+		return Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
+	}
+	if (platform === "darwin" || platform === "win32") {
+		return true;
+	}
+	return Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
+}
+
+export function getFirefoxCommandCandidates(
+	env: NodeJS.ProcessEnv = process.env,
+	platform: NodeJS.Platform = process.platform,
+): string[] {
+	const candidates = [
+		env.FIREFOX_BIN?.trim(),
+		"firefox",
+		"firefox-esr",
+		platform === "win32" ? "firefox.exe" : undefined,
+		platform === "darwin" ? "/Applications/Firefox.app/Contents/MacOS/firefox" : undefined,
+	];
+	return Array.from(new Set(candidates.filter((candidate): candidate is string => Boolean(candidate))));
+}
+
+export async function findFirefoxCommand(
+	pi: ExtensionAPI,
+	options: {
+		env?: NodeJS.ProcessEnv;
+		platform?: NodeJS.Platform;
+	} = {},
+): Promise<string | undefined> {
+	for (const command of getFirefoxCommandCandidates(options.env, options.platform)) {
+		try {
+			const result = await pi.exec(command, ["--version"]);
+			if (result.code === 0) {
+				return command;
+			}
+		} catch {
+			// Ignore missing commands and keep probing other Firefox variants.
+		}
+	}
+	return undefined;
+}
+
+export async function detectReviewBrowserAvailability(
+	pi: ExtensionAPI,
+	options: {
+		hasUI?: boolean;
+		env?: NodeJS.ProcessEnv;
+		platform?: NodeJS.Platform;
+	} = {},
+): Promise<ReviewBrowserAvailability> {
+	const env = options.env ?? process.env;
+	const platform = options.platform ?? process.platform;
+
+	if (options.hasUI === false) {
+		return {
+			available: false,
+			reason: "no-ui",
+			message: "Review presentation skipped because this session has no interactive UI.",
+		};
+	}
+
+	if (!hasGraphicalEnvironment(env, platform)) {
+		return {
+			available: false,
+			reason: "no-gui",
+			message: "Review presentation skipped because no graphical desktop environment was detected.",
+		};
+	}
+
+	const firefoxCommand = await findFirefoxCommand(pi, { env, platform });
+	if (!firefoxCommand) {
+		return {
+			available: false,
+			reason: "firefox-not-found",
+			message: "Review presentation skipped because Firefox was not found.",
+			triedCommands: getFirefoxCommandCandidates(env, platform),
+		};
+	}
+
+	return {
+		available: true,
+		firefoxCommand,
+	};
+}
+
+export function buildReviewHtmlOutputPath(markdownPath: string): string {
+	const parsed = path.parse(markdownPath);
+	if (/^\.(md|markdown)$/i.test(parsed.ext)) {
+		return path.join(parsed.dir, `${parsed.name}.html`);
+	}
+	return `${markdownPath}.html`;
+}
+
+export function escapeHtml(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
+}
+
+function isSafeReviewUrl(value: string, kind: "link" | "image"): boolean {
+	const trimmed = value.trim();
+	if (!trimmed) return false;
+	if (trimmed.startsWith("#") || trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
+		return true;
+	}
+
+	const compact = trimmed.replace(/[\u0000-\u001F\u007F\s]+/g, "");
+	const scheme = compact.match(/^([a-zA-Z][a-zA-Z0-9+.-]*):/)?.[1]?.toLowerCase();
+	if (!scheme) return true;
+	if (kind === "image") {
+		if (scheme === "data") {
+			return /^data:image\/(png|gif|jpe?g|webp);/i.test(compact);
+		}
+		return ["http", "https", "file"].includes(scheme);
+	}
+	return ["http", "https", "mailto", "file"].includes(scheme);
+}
+
+function inferReviewHtmlTitle(markdown: string, fallback: string): string {
+	const heading = markdown.match(/^#\s+(.+)$/m)?.[1]?.trim();
+	return heading || fallback;
+}
+
+export function renderReviewMarkdownToHtml(
+	markdown: string,
+	options: {
+		title?: string;
+	} = {},
+): string {
+	const renderer = new Renderer();
+	renderer.html = ({ text }: Tokens.HTML | Tokens.Tag) => escapeHtml(text);
+	renderer.link = function (this: Renderer, token: Tokens.Link) {
+		const href = token.href ?? "";
+		const label = this.parser.parseInline(token.tokens);
+		if (!isSafeReviewUrl(href, "link")) {
+			return label;
+		}
+		const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+		return `<a href="${escapeHtml(href)}"${title}>${label}</a>`;
+	};
+	renderer.image = function (this: Renderer, token: Tokens.Image) {
+		const href = token.href ?? "";
+		const alt = token.text ?? "";
+		if (!isSafeReviewUrl(href, "image")) {
+			return escapeHtml(alt);
+		}
+		const title = token.title ? ` title="${escapeHtml(token.title)}"` : "";
+		return `<img src="${escapeHtml(href)}" alt="${escapeHtml(alt)}"${title}>`;
+	};
+
+	const marked = new Marked({
+		gfm: true,
+		breaks: false,
+		renderer,
+	});
+	const body = marked.parse(markdown, { async: false }) as string;
+	const title = inferReviewHtmlTitle(markdown, options.title || "Review");
+
+	return [
+		"<!doctype html>",
+		'<html lang="en">',
+		"<head>",
+		'<meta charset="utf-8">',
+		'<meta name="viewport" content="width=device-width, initial-scale=1">',
+		'<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: file: http: https:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'">',
+		`<title>${escapeHtml(title)}</title>`,
+		"<style>",
+		":root { color-scheme: light dark; --bg: #f6f8fa; --fg: #1f2328; --muted: #656d76; --border: #d0d7de; --code-bg: #f0f3f6; --panel: #ffffff; }",
+		"@media (prefers-color-scheme: dark) { :root { --bg: #0d1117; --fg: #e6edf3; --muted: #8b949e; --border: #30363d; --code-bg: #161b22; --panel: #010409; } }",
+		"body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.55 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }",
+		"main { box-sizing: border-box; max-width: 980px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; background: var(--panel); min-height: 100vh; }",
+		"h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1.6em 0 0.6em; }",
+		"h1 { margin-top: 0; padding-bottom: 0.35em; border-bottom: 1px solid var(--border); }",
+		"a { color: #0969da; }",
+		"pre, code { font-family: ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace; }",
+		"code { background: var(--code-bg); border-radius: 0.25rem; padding: 0.12rem 0.28rem; }",
+		"pre { overflow: auto; background: var(--code-bg); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; }",
+		"pre code { background: transparent; padding: 0; border-radius: 0; }",
+		"blockquote { margin-left: 0; padding-left: 1rem; color: var(--muted); border-left: 0.25rem solid var(--border); }",
+		"img { max-width: 100%; }",
+		"table { border-collapse: collapse; width: 100%; margin: 1rem 0; }",
+		"th, td { border: 1px solid var(--border); padding: 0.45rem 0.6rem; vertical-align: top; }",
+		"hr { border: 0; border-top: 1px solid var(--border); margin: 2rem 0; }",
+		"</style>",
+		"</head>",
+		"<body>",
+		"<main>",
+		body,
+		"</main>",
+		"</body>",
+		"</html>",
+	].join("\n");
+}
+
+export function resolveReviewMarkdownPath(reviewPath: string, cwd: string = process.cwd()): string {
+	const trimmed = reviewPath.trim();
+	if (!trimmed) {
+		throw new Error("Review Markdown path is required.");
+	}
+	return path.normalize(path.isAbsolute(trimmed) ? trimmed : path.resolve(cwd, trimmed));
+}
+
+export function openFirefoxReview(firefoxCommand: string, htmlPath: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(firefoxCommand, ["--new-window", pathToFileURL(htmlPath).href], {
+			detached: true,
+			stdio: "ignore",
+		});
+		child.once("error", reject);
+		child.once("spawn", () => {
+			child.unref();
+			resolve();
+		});
+	});
+}
+
+export async function presentReviewMarkdown(
+	pi: ExtensionAPI,
+	options: {
+		reviewPath: string;
+		cwd?: string;
+		hasUI?: boolean;
+		env?: NodeJS.ProcessEnv;
+		platform?: NodeJS.Platform;
+		openBrowser?: ReviewBrowserOpener;
+	},
+): Promise<PresentReviewResult> {
+	const markdownPath = resolveReviewMarkdownPath(options.reviewPath, options.cwd);
+	const availability = await detectReviewBrowserAvailability(pi, {
+		hasUI: options.hasUI,
+		env: options.env,
+		platform: options.platform,
+	});
+
+	if (!availability.available) {
+		return {
+			presented: false,
+			reason: availability.reason,
+			markdownPath,
+			message: availability.message,
+			triedCommands: availability.triedCommands,
+		};
+	}
+
+	const markdown = await fs.readFile(markdownPath, "utf8");
+	const htmlPath = buildReviewHtmlOutputPath(markdownPath);
+	const html = renderReviewMarkdownToHtml(markdown, { title: path.basename(markdownPath) });
+	await fs.mkdir(path.dirname(htmlPath), { recursive: true });
+	await fs.writeFile(htmlPath, html, "utf8");
+
+	try {
+		await (options.openBrowser ?? openFirefoxReview)(availability.firefoxCommand, htmlPath);
+	} catch (error) {
+		return {
+			presented: false,
+			reason: "open-failed",
+			markdownPath,
+			htmlPath,
+			message: `Review HTML was written, but Firefox could not be opened: ${formatErrorMessage(error)}`,
+		};
+	}
+
+	return {
+		presented: true,
+		markdownPath,
+		htmlPath,
+		firefoxCommand: availability.firefoxCommand,
+		message: `Opened review HTML in Firefox: ${htmlPath}`,
+	};
+}
+
+function formatErrorMessage(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	return String(error);
+}
+
 export async function checkGhAuth(pi: ExtensionAPI): Promise<boolean> {
 	const result = await pi.exec("gh", ["auth", "status"]);
 	return result.code === 0;
@@ -781,9 +1106,12 @@ export async function prepareReviewRequest(
 	const commitSection = commitLog
 		? `\n\nCommit log (${reviewInputLabel.replace("...", "..")}):\n\n${commitLog}`
 		: "";
+	const presentationToolName = options.presentationToolName?.trim();
 	const outputInstruction = outputPath
 		? `\n\nWrite the full review as Markdown to \`${outputPath}\` (use the write tool). ` +
-			"Then respond here with a brief summary and the file path."
+			(presentationToolName
+				? `After writing the Markdown file, call \`${presentationToolName}\` with \`${outputPath}\` to present it in Firefox when available. If presentation is unavailable, continue normally. Then respond here with a brief summary and the file path.`
+				: "Then respond here with a brief summary and the file path.")
 		: "";
 
 	const prompt =
@@ -826,6 +1154,15 @@ export const __test = {
 	restoreSelection,
 	sanitizeFileComponent,
 	buildReviewOutputPath,
+	buildReviewHtmlOutputPath,
+	hasGraphicalEnvironment,
+	getFirefoxCommandCandidates,
+	findFirefoxCommand,
+	detectReviewBrowserAvailability,
+	escapeHtml,
+	renderReviewMarkdownToHtml,
+	resolveReviewMarkdownPath,
+	presentReviewMarkdown,
 	resolveSelectedReviews,
 	wantsCommitLog,
 	parseRefRange,

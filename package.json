@@ -34,6 +34,7 @@
     "test": "node --test ./pi-extensions/test/*.test.ts"
   },
   "dependencies": {
+    "marked": "^15.0.12",
     "yaml": "^2.8.2"
   }
 }

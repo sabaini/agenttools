@@ -91,6 +91,51 @@ test("prepareReviewRequest builds a deterministic branch review packet", async (
 		assert.match(prepared.prompt, /Diff \(main\.\.\.feat\/review-core\):/);
 		assert.match(prepared.prompt, /diff --git a\/file\.ts b\/file\.ts/);
 		assert.match(prepared.prompt, /Write the full review as Markdown to `\.pi\/reviews\/review-/);
+		assert.doesNotMatch(prepared.prompt, /present_review/);
+	});
+});
+
+test("prepareReviewRequest adds browser presentation instructions only when requested", async () => {
+	await withTempDir("review-core-presentation-prompt-", async (root) => {
+		const promptPath = path.join(root, "review-correctness.md");
+		await fs.writeFile(promptPath, "Review the code for correctness.", "utf8");
+
+		const pi = {
+			getCommands() {
+				return [{ source: "prompt", name: "review-correctness", path: promptPath }];
+			},
+			async exec(command: string, args: string[]) {
+				assert.equal(command, "git");
+				if (args[0] === "rev-parse" && args[1] === "--abbrev-ref" && args[2] === "HEAD") {
+					return { code: 0, stdout: "feat/presentation\n", stderr: "" };
+				}
+				if (args[0] === "rev-parse" && args[1] === "--verify" && args[2] === "HEAD") {
+					return { code: 0, stdout: "", stderr: "" };
+				}
+				if (args[0] === "diff") {
+					return { code: 0, stdout: "diff --git a/a.ts b/a.ts\n+ok\n", stderr: "" };
+				}
+				if (args[0] === "ls-files" && args[1] === "--others") {
+					return { code: 0, stdout: "", stderr: "" };
+				}
+				throw new Error(`unexpected exec args: ${JSON.stringify(args)}`);
+			},
+		};
+
+		const sharedToolPrompt = await prepareReviewRequest(pi as never, {
+			scope: { kind: "working-tree" },
+			outputPath: ".pi/reviews/shared.md",
+		});
+		assert.match(sharedToolPrompt.prompt, /Then respond here with a brief summary and the file path\./);
+		assert.doesNotMatch(sharedToolPrompt.prompt, /present_review/);
+
+		const interactivePrompt = await prepareReviewRequest(pi as never, {
+			scope: { kind: "working-tree" },
+			outputPath: ".pi/reviews/interactive.md",
+			presentationToolName: "present_review",
+		});
+		assert.match(interactivePrompt.prompt, /call `present_review` with `\.pi\/reviews\/interactive\.md`/);
+		assert.match(interactivePrompt.prompt, /If presentation is unavailable, continue normally/);
 	});
 });
 
@@ -436,4 +481,192 @@ test("buildReviewOutputPath sanitizes branch names", () => {
 	const outputPath = __test.buildReviewOutputPath("feat/review core");
 	assert.match(outputPath, /^\.pi[\\/]reviews[\\/]review-/);
 	assert.match(outputPath, /feat-review-core\.md$/);
+});
+
+test("buildReviewHtmlOutputPath derives an html companion next to markdown", () => {
+	assert.equal(
+		__test.buildReviewHtmlOutputPath(path.join(".pi", "reviews", "review-one.md")),
+		path.join(".pi", "reviews", "review-one.html"),
+	);
+	assert.equal(
+		__test.buildReviewHtmlOutputPath(path.join(".pi", "reviews", "review-two.markdown")),
+		path.join(".pi", "reviews", "review-two.html"),
+	);
+	assert.equal(
+		__test.buildReviewHtmlOutputPath(path.join(".pi", "reviews", "review-three")),
+		path.join(".pi", "reviews", "review-three.html"),
+	);
+});
+
+test("renderReviewMarkdownToHtml escapes raw html and strips unsafe links", () => {
+	const html = __test.renderReviewMarkdownToHtml(
+		[
+			"# Review <Result>",
+			"",
+			"<script>alert('x')</script>",
+			"",
+			"[unsafe](javascript:alert(1)) and [safe](https://example.com)",
+			"",
+			"```html",
+			"<div>code is escaped by marked</div>",
+			"```",
+		].join("\n"),
+	);
+
+	assert.match(html, /<!doctype html>/);
+	assert.match(html, /<title>Review &lt;Result&gt;<\/title>/);
+	assert.match(html, /&lt;script&gt;alert\(&#39;x&#39;\)&lt;\/script&gt;/);
+	assert.doesNotMatch(html, /<script\b/i);
+	assert.doesNotMatch(html, /href="javascript:/i);
+	assert.match(html, /<a href="https:\/\/example\.com">safe<\/a>/);
+});
+
+test("browser detection requires UI, GUI, and Firefox", async () => {
+	let execCalls = 0;
+	const pi = {
+		async exec(command: string, args: string[]) {
+			execCalls += 1;
+			assert.deepEqual(args, ["--version"]);
+			return command === "/custom/firefox"
+				? { code: 0, stdout: "Mozilla Firefox", stderr: "" }
+				: { code: 1, stdout: "", stderr: "missing" };
+		},
+	};
+
+	assert.equal(__test.hasGraphicalEnvironment({}, "linux"), false);
+	assert.equal(__test.hasGraphicalEnvironment({ WAYLAND_DISPLAY: "wayland-0" }, "linux"), true);
+
+	const noUi = await __test.detectReviewBrowserAvailability(pi as never, {
+		hasUI: false,
+		env: { DISPLAY: ":1", FIREFOX_BIN: "/custom/firefox" },
+		platform: "linux",
+	});
+	assert.deepEqual(noUi, {
+		available: false,
+		reason: "no-ui",
+		message: "Review presentation skipped because this session has no interactive UI.",
+	});
+
+	const noGui = await __test.detectReviewBrowserAvailability(pi as never, {
+		hasUI: true,
+		env: { FIREFOX_BIN: "/custom/firefox" },
+		platform: "linux",
+	});
+	assert.equal(noGui.available, false);
+	if (!noGui.available) assert.equal(noGui.reason, "no-gui");
+
+	const missing = await __test.detectReviewBrowserAvailability(
+		{
+			async exec() {
+				return { code: 1, stdout: "", stderr: "missing" };
+			},
+		} as never,
+		{
+			hasUI: true,
+			env: { DISPLAY: ":1" },
+			platform: "linux",
+		},
+	);
+	assert.equal(missing.available, false);
+	if (!missing.available) {
+		assert.equal(missing.reason, "firefox-not-found");
+		assert.deepEqual(missing.triedCommands, ["firefox", "firefox-esr"]);
+	}
+
+	const available = await __test.detectReviewBrowserAvailability(pi as never, {
+		hasUI: true,
+		env: { DISPLAY: ":1", FIREFOX_BIN: "/custom/firefox" },
+		platform: "linux",
+	});
+	assert.deepEqual(available, { available: true, firefoxCommand: "/custom/firefox" });
+	assert.equal(execCalls, 1);
+});
+
+test("presentReviewMarkdown falls back without writing html when browser is unavailable", async () => {
+	await withTempDir("review-present-fallback-", async (root) => {
+		const markdownPath = path.join(root, "review.md");
+		await fs.writeFile(markdownPath, "# Review\n", "utf8");
+		let opened = false;
+		const pi = {
+			async exec() {
+				throw new Error("Firefox should not be probed without a GUI");
+			},
+		};
+
+		const result = await __test.presentReviewMarkdown(pi as never, {
+			reviewPath: markdownPath,
+			env: {},
+			platform: "linux",
+			hasUI: true,
+			openBrowser: () => {
+				opened = true;
+			},
+		});
+
+		assert.equal(result.presented, false);
+		if (!result.presented) assert.equal(result.reason, "no-gui");
+		assert.equal(opened, false);
+		await assert.rejects(() => fs.stat(path.join(root, "review.html")), /ENOENT/);
+	});
+});
+
+test("presentReviewMarkdown reports open failures after writing html", async () => {
+	await withTempDir("review-present-open-failed-", async (root) => {
+		const markdownPath = path.join(root, "review.md");
+		await fs.writeFile(markdownPath, "# Review\n", "utf8");
+		const pi = {
+			async exec() {
+				return { code: 0, stdout: "Mozilla Firefox", stderr: "" };
+			},
+		};
+
+		const result = await __test.presentReviewMarkdown(pi as never, {
+			reviewPath: markdownPath,
+			env: { DISPLAY: ":1" },
+			platform: "linux",
+			hasUI: true,
+			openBrowser: () => {
+				throw new Error("spawn failed");
+			},
+		});
+
+		assert.equal(result.presented, false);
+		if (!result.presented) {
+			assert.equal(result.reason, "open-failed");
+			assert.equal(result.htmlPath, path.join(root, "review.html"));
+		}
+		await fs.stat(path.join(root, "review.html"));
+	});
+});
+
+test("presentReviewMarkdown writes html and opens Firefox when available", async () => {
+	await withTempDir("review-present-success-", async (root) => {
+		const markdownPath = path.join(root, "review.md");
+		await fs.writeFile(markdownPath, "# Review\n\nLooks good.", "utf8");
+		let opened: { command: string; htmlPath: string } | undefined;
+		const pi = {
+			async exec(command: string, args: string[]) {
+				assert.equal(command, "firefox");
+				assert.deepEqual(args, ["--version"]);
+				return { code: 0, stdout: "Mozilla Firefox", stderr: "" };
+			},
+		};
+
+		const result = await __test.presentReviewMarkdown(pi as never, {
+			reviewPath: "review.md",
+			cwd: root,
+			env: { DISPLAY: ":1" },
+			platform: "linux",
+			hasUI: true,
+			openBrowser: (command, htmlPath) => {
+				opened = { command, htmlPath };
+			},
+		});
+
+		assert.equal(result.presented, true);
+		assert.equal(opened?.command, "firefox");
+		assert.equal(opened?.htmlPath, path.join(root, "review.html"));
+		const html = await fs.readFile(path.join(root, "review.html"), "utf8");
+		assert.match(html, /<h1>Review<\/h1>/);
+	});
 });
