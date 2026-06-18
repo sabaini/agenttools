@@ -1,11 +1,9 @@
 ---
 name: reviewskill
-description: Prepare and perform deterministic all-rubric code reviews for working-tree changes, branch/range diffs, GitHub pull requests, or complete repositories. Use when the user asks for a /review-like code review in any harness.
+description: Prepare and perform deterministic all-rubric code reviews for working-tree changes, branch/range diffs, GitHub pull requests, or complete repositories. Use when the user asks for a code review.
 ---
 
 # Review Skill
-
-This is a harness-neutral replacement for a `/review` extension. It preserves flexible review scope selection while always enabling every bundled rubric.
 
 Requirements: `python3` and `git`; GitHub PR reviews additionally require an authenticated `gh` CLI.
 
@@ -85,7 +83,7 @@ Review expectations:
 
 ## Optional browser presentation
 
-Only do this if the user asks for browser/HTML presentation or if the harness workflow explicitly wants it. After writing the Markdown review report, run:
+Do this if a browser and GUI is on the PATH. After writing the Markdown review report, run:
 
 ```bash
 python3 <skill-dir>/scripts/present_review.py <review-report.md>
