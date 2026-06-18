@@ -55,6 +55,12 @@ Examples:
 
 `/specwriter` remains useful for improving an existing spec draft.
 
+## Review skill
+
+`skills/reviewskill` is a pure Agent Skills-compatible review workflow for harnesses that cannot load the Pi `/review` extension. It uses dependency-free Python scripts to prepare deterministic review packets for working-tree, branch/range, GitHub PR, or whole-repository scopes. All bundled review rubrics are always enabled.
+
+Optional browser presentation is available via `skills/reviewskill/scripts/present_review.py`, which renders a Markdown review report to a sibling HTML file and opens it when a GUI/browser is available.
+
 ## Review extension
 
 The review extension also registers a shared `prepare_review` tool. `/review` uses the same core review-preparation logic as the tool.
