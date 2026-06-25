@@ -616,9 +616,15 @@ Review guidance:
 - Prioritize actionable defects over style-only nits.
 - Do not invent findings. Each finding should cite concrete evidence from the diff, snapshot, PR context, or commit log.
 - Prefer fewer high-signal findings to exhaustive speculation.
-- If no material issues are found for a rubric, do not force a finding for that rubric.
 - Include test-quality observations when tests are missing, weak, or insufficient for the risk introduced.
 - Call out uncertainty explicitly when the packet is truncated or relevant context is unavailable.
+
+Review calibration:
+
+- Do not force findings for every rubric. "No material issues found" is a valid outcome.
+- If a finding depends on external-system behavior, verify it against docs, source, or specs and cite it. If you cannot verify it after trying, mark it unverified and present it as a question/follow-up, not a blocker.
+- Before marking a finding blocking/high-severity, identify the concrete fact that would make it not a bug and confirm that fact is false.
+- Missing tests are test-quality gaps, not evidence that runtime behavior is broken.
 
 Suggested report structure:
 

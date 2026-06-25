@@ -15,6 +15,15 @@ export const DEFAULT_REVIEW_PROMPTS_DIR = path.resolve(
 	"../../pi-prompts",
 );
 
+const REVIEW_CALIBRATION = [
+	"Review calibration:",
+	"",
+	'- Do not force findings for every rubric. "No material issues found" is a valid outcome.',
+	"- If a finding depends on external-system behavior, verify it against docs, source, or specs and cite it. If you cannot verify it after trying, mark it unverified and present it as a question/follow-up, not a blocker.",
+	"- Before marking a finding blocking/high-severity, identify the concrete fact that would make it not a bug and confirm that fact is false.",
+	"- Missing tests are test-quality gaps, not evidence that runtime behavior is broken.",
+].join("\n");
+
 export interface ReviewType {
 	id: string;
 	label: string;
@@ -1118,6 +1127,8 @@ export async function prepareReviewRequest(
 		scopeHeading +
 		"\n\n" +
 		reviewBlocks +
+		"\n\n" +
+		REVIEW_CALIBRATION +
 		scopeContract +
 		repositoryInventory +
 		repositoryTruncationNote +

@@ -88,6 +88,10 @@ test("prepareReviewRequest builds a deterministic branch review packet", async (
 		assert.deepEqual(prepared.activeReviews.map((review) => review.id), ["review-correctness"]);
 		assert.match(prepared.prompt, /Please review the following changes\./);
 		assert.match(prepared.prompt, /### correctness\nReview the code for correctness\./);
+		assert.match(prepared.prompt, /Review calibration:/);
+		assert.match(prepared.prompt, /No material issues found/);
+		assert.match(prepared.prompt, /external-system behavior/);
+		assert.match(prepared.prompt, /Missing tests are test-quality gaps/);
 		assert.match(prepared.prompt, /Diff \(main\.\.\.feat\/review-core\):/);
 		assert.match(prepared.prompt, /diff --git a\/file\.ts b\/file\.ts/);
 		assert.match(prepared.prompt, /Write the full review as Markdown to `\.pi\/reviews\/review-/);
