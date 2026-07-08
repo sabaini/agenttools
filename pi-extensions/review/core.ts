@@ -24,6 +24,51 @@ const REVIEW_CALIBRATION = [
 	"- Missing tests are test-quality gaps, not evidence that runtime behavior is broken.",
 ].join("\n");
 
+const REVIEW_GUIDANCE = [
+	"Review guidance:",
+	"",
+	"- Prioritize actionable defects over style-only nits.",
+	"- Do not invent findings. Each finding should cite concrete evidence from the diff, snapshot, PR context, or commit log.",
+	"- Prefer fewer high-signal findings to exhaustive speculation.",
+	"- Include test-quality observations when tests are missing, weak, or insufficient for the risk introduced.",
+	"- Call out uncertainty explicitly when the packet is truncated or relevant context is unavailable.",
+].join("\n");
+
+function reviewReportStructure(label: string): string {
+	return [
+		"Suggested report structure:",
+		"",
+		"```markdown",
+		`# Review: ${label}`,
+		"",
+		"## Summary",
+		"",
+		"## Findings",
+		"",
+		"### <severity>: <short title>",
+		"- Location: <file/function/line if available>",
+		"- Evidence: <what in the packet shows the problem>",
+		"- Impact: <why it matters>",
+		"- Recommendation: <specific fix or mitigation>",
+		"",
+		"## Tests and follow-up",
+		"```",
+	].join("\n");
+}
+
+/**
+ * Build a fenced code block whose fence is long enough that no run of backticks
+ * inside the content can prematurely close it. Mirrors the skill's markdown_fence().
+ */
+function markdownFence(content: string, language = ""): string {
+	let longest = 0;
+	for (const match of content.matchAll(/`+/g)) {
+		longest = Math.max(longest, match[0].length);
+	}
+	const fence = "`".repeat(Math.max(3, longest + 1));
+	return `${fence}${language.trim()}\n${content}\n${fence}`;
+}
+
 export interface ReviewType {
 	id: string;
 	label: string;
@@ -532,13 +577,13 @@ export function buildReviewOutputPath(branch: string): string {
 export type ReviewPresentationUnavailableReason =
 	| "no-ui"
 	| "no-gui"
-	| "firefox-not-found"
+	| "browser-not-found"
 	| "open-failed";
 
 export type ReviewBrowserAvailability =
 	| {
 		available: true;
-		firefoxCommand: string;
+		browserCommand: string;
 	}
 	| {
 		available: false;
@@ -552,7 +597,7 @@ export type PresentReviewResult =
 		presented: true;
 		markdownPath: string;
 		htmlPath: string;
-		firefoxCommand: string;
+		browserCommand: string;
 		message: string;
 	}
 	| {
@@ -564,7 +609,8 @@ export type PresentReviewResult =
 		triedCommands?: string[];
 	};
 
-export type ReviewBrowserOpener = (firefoxCommand: string, htmlPath: string) => Promise<void> | void;
+/** Open an HTML file in a browser command (xdg-open/open/start/firefox). */
+export type ReviewBrowserOpener = (command: string, htmlPath: string) => Promise<void> | void;
 
 export function hasGraphicalEnvironment(
 	env: NodeJS.ProcessEnv = process.env,
@@ -579,11 +625,20 @@ export function hasGraphicalEnvironment(
 	return Boolean(env.DISPLAY || env.WAYLAND_DISPLAY);
 }
 
-export function getFirefoxCommandCandidates(
+/**
+ * Candidate browser-open commands for the current platform. The system default
+ * browser opener (xdg-open / open / start) is preferred; Firefox variants are
+ * kept as fallbacks so existing setups still work. Mirrors the skill's behavior.
+ */
+export function getBrowserCommandCandidates(
 	env: NodeJS.ProcessEnv = process.env,
 	platform: NodeJS.Platform = process.platform,
 ): string[] {
 	const candidates = [
+		env.BROWSER?.trim(),
+		platform === "linux" ? "xdg-open" : undefined,
+		platform === "darwin" ? "open" : undefined,
+		platform === "win32" ? "start" : undefined,
 		env.FIREFOX_BIN?.trim(),
 		"firefox",
 		"firefox-esr",
@@ -593,26 +648,46 @@ export function getFirefoxCommandCandidates(
 	return Array.from(new Set(candidates.filter((candidate): candidate is string => Boolean(candidate))));
 }
 
-export async function findFirefoxCommand(
+/**
+ * Probe flags for a candidate browser command. `xdg-open`, `open`, and Firefox
+ * variants answer `--version` (xdg-open also accepts `--help`); Windows `start`
+ * is probed via `cmd /c` since it has no stable flag.
+ */
+function browserProbeArgs(command: string): string[] {
+	if (command === "start") {
+		return ["/c", "start", "/b", ""];
+	}
+	return ["--version"];
+}
+
+export async function findBrowserCommand(
 	pi: ExtensionAPI,
 	options: {
 		env?: NodeJS.ProcessEnv;
 		platform?: NodeJS.Platform;
 	} = {},
 ): Promise<string | undefined> {
-	for (const command of getFirefoxCommandCandidates(options.env, options.platform)) {
+	const platform = options.platform ?? process.platform;
+	for (const command of getBrowserCommandCandidates(options.env, platform)) {
+		const execCommand = command === "start" ? "cmd" : command;
+		const probe = browserProbeArgs(command);
 		try {
-			const result = await pi.exec(command, ["--version"]);
+			const result = await pi.exec(execCommand, probe);
 			if (result.code === 0) {
 				return command;
 			}
 		} catch {
-			// Ignore missing commands and keep probing other Firefox variants.
+			// Ignore missing commands and keep probing other candidates.
 		}
 	}
 	return undefined;
 }
 
+/**
+ * Detect whether a browser is available for presenting the review HTML.
+ * Requires a UI, a graphical environment, and a resolvable browser opener
+ * (xdg-open / open / start / firefox).
+ */
 export async function detectReviewBrowserAvailability(
 	pi: ExtensionAPI,
 	options: {
@@ -640,19 +715,19 @@ export async function detectReviewBrowserAvailability(
 		};
 	}
 
-	const firefoxCommand = await findFirefoxCommand(pi, { env, platform });
-	if (!firefoxCommand) {
+	const browserCommand = await findBrowserCommand(pi, { env, platform });
+	if (!browserCommand) {
 		return {
 			available: false,
-			reason: "firefox-not-found",
-			message: "Review presentation skipped because Firefox was not found.",
-			triedCommands: getFirefoxCommandCandidates(env, platform),
+			reason: "browser-not-found",
+			message: "Review presentation skipped because no browser was found.",
+			triedCommands: getBrowserCommandCandidates(env, platform),
 		};
 	}
 
 	return {
 		available: true,
-		firefoxCommand,
+		browserCommand,
 	};
 }
 
@@ -776,9 +851,16 @@ export function resolveReviewMarkdownPath(reviewPath: string, cwd: string = proc
 	return path.normalize(path.isAbsolute(trimmed) ? trimmed : path.resolve(cwd, trimmed));
 }
 
-export function openFirefoxReview(firefoxCommand: string, htmlPath: string): Promise<void> {
+/**
+ * Open an HTML file in a browser command. `xdg-open`/`open`/`start` take the
+ * URL directly; Firefox variants open it in a new window.
+ */
+export function openReviewInBrowser(command: string, htmlPath: string): Promise<void> {
+	const url = pathToFileURL(htmlPath).href;
+	const isFirefoxLike = /firefox/i.test(command);
+	const args = isFirefoxLike ? ["--new-window", url] : [url];
 	return new Promise((resolve, reject) => {
-		const child = spawn(firefoxCommand, ["--new-window", pathToFileURL(htmlPath).href], {
+		const child = spawn(command, args, {
 			detached: true,
 			stdio: "ignore",
 		});
@@ -790,6 +872,11 @@ export function openFirefoxReview(firefoxCommand: string, htmlPath: string): Pro
 	});
 }
 
+/**
+ * Render the review Markdown to HTML, write it next to the source file, and
+ * open it in a browser when one is available. Returns a result describing
+ * whether presentation succeeded and why.
+ */
 export async function presentReviewMarkdown(
 	pi: ExtensionAPI,
 	options: {
@@ -798,6 +885,7 @@ export async function presentReviewMarkdown(
 		hasUI?: boolean;
 		env?: NodeJS.ProcessEnv;
 		platform?: NodeJS.Platform;
+		/** Override the browser opener (tests). */
 		openBrowser?: ReviewBrowserOpener;
 	},
 ): Promise<PresentReviewResult> {
@@ -825,14 +913,14 @@ export async function presentReviewMarkdown(
 	await fs.writeFile(htmlPath, html, "utf8");
 
 	try {
-		await (options.openBrowser ?? openFirefoxReview)(availability.firefoxCommand, htmlPath);
+		await (options.openBrowser ?? openReviewInBrowser)(availability.browserCommand, htmlPath);
 	} catch (error) {
 		return {
 			presented: false,
 			reason: "open-failed",
 			markdownPath,
 			htmlPath,
-			message: `Review HTML was written, but Firefox could not be opened: ${formatErrorMessage(error)}`,
+			message: `Review HTML was written, but the browser could not be opened: ${formatErrorMessage(error)}`,
 		};
 	}
 
@@ -840,8 +928,8 @@ export async function presentReviewMarkdown(
 		presented: true,
 		markdownPath,
 		htmlPath,
-		firefoxCommand: availability.firefoxCommand,
-		message: `Opened review HTML in Firefox: ${htmlPath}`,
+		browserCommand: availability.browserCommand,
+		message: `Opened review HTML in browser: ${htmlPath}`,
 	};
 }
 
@@ -942,10 +1030,6 @@ export async function getPrCommitLog(pi: ExtensionAPI, prRef: string): Promise<s
 	return data.commits.map((commit) => `${commit.oid.slice(0, 7)} ${commit.messageHeadline}`).join("\n");
 }
 
-function wantsCommitLog(activeReviews: ReviewType[]): boolean {
-	return activeReviews.some((review) => review.id === `${REVIEW_PREFIX}commit-discipline`);
-}
-
 function resolveSelectedReviews(reviewTypes: ReviewType[], reviewIds?: string[]): ReviewType[] {
 	if (!reviewIds || reviewIds.length === 0) {
 		return reviewTypes;
@@ -1027,9 +1111,7 @@ export async function prepareReviewRequest(
 			if (revisionExpression) {
 				reviewInputText = await getRevisionExpressionDiff(pi, revisionExpression);
 				reviewInputLabel = revisionExpression;
-				if (wantsCommitLog(activeReviews)) {
-					commitLog = await getRevisionExpressionCommitLog(pi, revisionExpression);
-				}
+				commitLog = await getRevisionExpressionCommitLog(pi, revisionExpression);
 				break;
 			}
 
@@ -1040,9 +1122,7 @@ export async function prepareReviewRequest(
 			}
 			reviewInputText = await getBranchDiff(pi, base, head, operator);
 			reviewInputLabel = `${base}${operator}${head}`;
-			if (wantsCommitLog(activeReviews)) {
-				commitLog = await getCommitLog(pi, base, head);
-			}
+			commitLog = await getCommitLog(pi, base, head);
 			break;
 		}
 		case "repository": {
@@ -1065,9 +1145,7 @@ export async function prepareReviewRequest(
 			const prInfo = await getPrDetails(pi, prRef);
 			reviewInputText = await getPrDiff(pi, prRef);
 			reviewInputLabel = `PR #${prInfo.number} (${prInfo.headRefName} → ${prInfo.baseRefName})`;
-			if (wantsCommitLog(activeReviews)) {
-				commitLog = await getPrCommitLog(pi, prRef);
-			}
+			commitLog = await getPrCommitLog(pi, prRef);
 			const prBody = prInfo.body?.trim() ? `\n\nPR description:\n${prInfo.body.trim()}` : "";
 			prContext =
 				`\n\nPull Request: #${prInfo.number} — ${prInfo.title}` +
@@ -1085,7 +1163,6 @@ export async function prepareReviewRequest(
 	}
 
 	const outputPath = options.outputPath?.trim() || buildReviewOutputPath(branch);
-	const reviewBlocks = activeReviews.map((review) => `### ${review.label}\n${review.prompt}`).join("\n\n");
 	const reviewInputTruncation = await applyTruncationWithNotice(
 		reviewInputText,
 		reviewInputTitle,
@@ -1097,53 +1174,56 @@ export async function prepareReviewRequest(
 		? "Please review the complete codebase."
 		: "Please review the following changes.";
 	const scopeContract = isRepositoryScope
-		? "\n\nScope contract:" +
-			"\n- This is a complete-codebase review. Do not limit the review to recent commits, branch diffs, or the last commit." +
-			"\n- Review the full repository snapshot (tracked + untracked files, excluding .gitignored files)."
-		: "";
+		? "\n- This is a complete-codebase review. Do not limit the review to recent commits, branch diffs, or the last commit." +
+			"\n- Review the full repository snapshot (tracked + untracked files, excluding .gitignored files), subject to any truncation notice."
+		: "\n- This is a change review. Focus on the diff/PR/range shown below.";
 	const repositoryInventory = isRepositoryScope && repositorySnapshotStats
-		? "\n\nRepository inventory:" +
-			`\n- Files scanned: ${repositorySnapshotStats.scannedFiles}` +
-			`\n- Ignored by .gitignore: ${repositorySnapshotStats.ignoredFiles}` +
-			`\n- Skipped binary files: ${repositorySnapshotStats.skippedBinaryFiles}` +
-			`\n- Skipped unreadable files: ${repositorySnapshotStats.skippedUnreadableFiles}`
+		? "\n\n## Repository inventory\n\n" +
+			`- Files scanned: ${repositorySnapshotStats.scannedFiles}\n` +
+			`- Ignored by .gitignore: ${repositorySnapshotStats.ignoredFiles}\n` +
+			`- Skipped binary files: ${repositorySnapshotStats.skippedBinaryFiles}\n` +
+			`- Skipped unreadable files: ${repositorySnapshotStats.skippedUnreadableFiles}\n`
 		: "";
-	const repositoryTruncationNote = isRepositoryScope && reviewInputTruncation.notice
-		? `\n\nImportant: ${reviewInputTruncation.notice}. ` +
-			"Continue by inspecting the full snapshot file before finalizing the review."
+	const truncationNotice = reviewInputTruncation.notice
+		? "\n\n## Truncation notice\n\n" +
+			`${reviewInputTruncation.notice}\n\n` +
+			"If your harness can read local files, inspect that full-input file before finalizing the review. " +
+			"If it cannot, clearly state that the review is based on the truncated packet.\n"
+		: "";
+	const rubricBlocks = activeReviews
+		.map((review) => `### ${review.label}\n\n${review.prompt}`)
+		.join("\n\n");
+	const prContextSection = prContext
+		? "\n\n## Pull request context\n\n" + markdownFence(prContext.trim(), "text") + "\n"
 		: "";
 	const commitSection = commitLog
-		? `\n\nCommit log (${reviewInputLabel.replace("...", "..")}):\n\n${commitLog}`
+		? "\n\n## Commit log\n\n" + markdownFence(commitLog, "text") + "\n"
 		: "";
 	const presentationToolName = options.presentationToolName?.trim();
 	const outputInstruction = outputPath
 		? `\n\nWrite the full review as Markdown to \`${outputPath}\` (use the write tool). ` +
 			(presentationToolName
-				? `After writing the Markdown file, call \`${presentationToolName}\` with \`${outputPath}\` to present it in Firefox when available. If presentation is unavailable, continue normally. Then respond here with a brief summary and the file path.`
-				: "Then respond here with a brief summary and the file path.")
+				? `After writing the Markdown file, call \`${presentationToolName}\` with \`${outputPath}\` to present it in a browser when available. If presentation is unavailable, continue normally. Then respond here with a brief summary and the file path.`
+				: "If your harness cannot write files, provide the review inline and say that file output was unavailable. Then respond here with a brief summary and the file path.")
 		: "";
+	const activeRubrics = activeReviews.map((review) => review.id).join(", ");
+	const inputBlock = markdownFence(reviewInputBody, reviewInputFence);
 
 	const prompt =
-		scopeHeading +
-		"\n\n" +
-		reviewBlocks +
-		"\n\n" +
-		REVIEW_CALIBRATION +
-		scopeContract +
-		repositoryInventory +
-		repositoryTruncationNote +
-		prContext +
-		commitSection +
-		outputInstruction +
-		"\n\n" +
-		reviewInputTitle +
-		" (" +
-		reviewInputLabel +
-		"):\n```" +
-		reviewInputFence +
-		"\n" +
-		reviewInputBody +
-		"\n```\n";
+		`${scopeHeading}\n\n` +
+		`Active rubrics: ${activeRubrics}\n` +
+		`Review input: ${reviewInputLabel}\n\n` +
+		`Scope contract:${scopeContract}\n\n` +
+		`${REVIEW_GUIDANCE}\n\n` +
+		`${REVIEW_CALIBRATION}\n\n` +
+		`${reviewReportStructure(reviewInputLabel)}` +
+		`${outputInstruction}` +
+		`${repositoryInventory}` +
+		`${truncationNotice}` +
+		`\n\n## Rubrics\n\n${rubricBlocks}` +
+		`${prContextSection}` +
+		`${commitSection}` +
+		`\n\n## ${reviewInputTitle} (${reviewInputLabel})\n\n${inputBlock}\n`;
 
 	return {
 		branch,
@@ -1167,14 +1247,13 @@ export const __test = {
 	buildReviewOutputPath,
 	buildReviewHtmlOutputPath,
 	hasGraphicalEnvironment,
-	getFirefoxCommandCandidates,
-	findFirefoxCommand,
+	getBrowserCommandCandidates,
+	findBrowserCommand,
 	detectReviewBrowserAvailability,
 	escapeHtml,
 	renderReviewMarkdownToHtml,
 	resolveReviewMarkdownPath,
 	presentReviewMarkdown,
 	resolveSelectedReviews,
-	wantsCommitLog,
 	parseRefRange,
 };

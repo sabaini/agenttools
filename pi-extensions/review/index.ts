@@ -39,7 +39,7 @@ type PrepareReviewToolParams = Static<typeof prepareReviewSchema>;
 
 const presentReviewSchema = Type.Object({
 	reviewPath: Type.String({
-		description: "Path to the Markdown review file to render and open in Firefox when a GUI is available.",
+		description: "Path to the Markdown review file to render and present in a browser when a GUI is available.",
 	}),
 });
 
@@ -113,8 +113,8 @@ export default function reviewExtension(pi: ExtensionAPI) {
 		label: "Present Review",
 		description:
 			"Best-effort browser presentation for interactive /review results. " +
-			"Renders a Markdown review as HTML and opens it in Firefox only when this session has a UI, a GUI is available, and Firefox is installed.",
-		promptSnippet: "Present an interactive /review Markdown result in Firefox when explicitly requested by the review prompt.",
+			"Renders a Markdown review as HTML and opens it in the system browser when this session has a UI and a GUI is available.",
+		promptSnippet: "Present an interactive /review Markdown result in a browser when explicitly requested by the review prompt.",
 		promptGuidelines: [
 			"Use this only when the current review prompt explicitly asks for browser presentation.",
 			"If presentation is unavailable, continue with the normal Markdown review summary/path response.",
@@ -132,7 +132,7 @@ export default function reviewExtension(pi: ExtensionAPI) {
 					{
 						type: "text",
 						text: result.presented
-							? `Presented review in Firefox. Markdown: ${result.markdownPath}\nHTML: ${result.htmlPath}`
+							? `Presented review in browser. Markdown: ${result.markdownPath}\nHTML: ${result.htmlPath}`
 							: `${result.message}\nMarkdown: ${result.markdownPath}`,
 					},
 				],

@@ -76,6 +76,9 @@ test("prepareReviewRequest builds a deterministic branch review packet", async (
 						stderr: "",
 					};
 				}
+				if (args[0] === "log" && args[1] === "--oneline" && args[2] === "main..feat/review-core") {
+					return { code: 0, stdout: "abc1234 feat: add value\n", stderr: "" };
+				}
 				throw new Error(`unexpected exec args: ${JSON.stringify(args)}`);
 			},
 		};
@@ -87,13 +90,15 @@ test("prepareReviewRequest builds a deterministic branch review packet", async (
 		assert.equal(prepared.branch, "feat/review-core");
 		assert.deepEqual(prepared.activeReviews.map((review) => review.id), ["review-correctness"]);
 		assert.match(prepared.prompt, /Please review the following changes\./);
-		assert.match(prepared.prompt, /### correctness\nReview the code for correctness\./);
+		assert.match(prepared.prompt, /### correctness\n\nReview the code for correctness\./);
 		assert.match(prepared.prompt, /Review calibration:/);
 		assert.match(prepared.prompt, /No material issues found/);
 		assert.match(prepared.prompt, /external-system behavior/);
 		assert.match(prepared.prompt, /Missing tests are test-quality gaps/);
-		assert.match(prepared.prompt, /Diff \(main\.\.\.feat\/review-core\):/);
+		assert.match(prepared.prompt, /## Diff \(main\.\.\.feat\/review-core\)/);
 		assert.match(prepared.prompt, /diff --git a\/file\.ts b\/file\.ts/);
+		assert.match(prepared.prompt, /## Commit log/);
+		assert.match(prepared.prompt, /abc1234 feat: add value/);
 		assert.match(prepared.prompt, /Write the full review as Markdown to `\.pi\/reviews\/review-/);
 		assert.doesNotMatch(prepared.prompt, /present_review/);
 	});
@@ -178,6 +183,9 @@ test("prepareReviewRequest accepts commit refs for branch scope", async () => {
 						stderr: "",
 					};
 				}
+				if (args[0] === "log" && args[1] === "--oneline" && args[2] === "HEAD^..main") {
+					return { code: 0, stdout: "def5678 fix: value 2\n", stderr: "" };
+				}
 				throw new Error(`unexpected exec args: ${JSON.stringify(args)}`);
 			},
 		};
@@ -186,7 +194,7 @@ test("prepareReviewRequest accepts commit refs for branch scope", async () => {
 			scope: { kind: "branch", base: "HEAD^" },
 		});
 
-		assert.match(prepared.prompt, /Diff \(HEAD\^\.\.\.main\):/);
+		assert.match(prepared.prompt, /## Diff \(HEAD\^\.\.\.main\)/);
 		assert.match(prepared.prompt, /\+const value = 2;/);
 	});
 });
@@ -226,6 +234,9 @@ test("prepareReviewRequest accepts range expressions for branch scope", async ()
 						stderr: "",
 					};
 				}
+				if (args[0] === "log" && args[1] === "--oneline" && args[2] === "abc123..def456") {
+					return { code: 0, stdout: "abc1234 add ranged\n", stderr: "" };
+				}
 				throw new Error(`unexpected exec args: ${JSON.stringify(args)}`);
 			},
 		};
@@ -234,7 +245,7 @@ test("prepareReviewRequest accepts range expressions for branch scope", async ()
 			scope: { kind: "branch", base: "abc123..def456" },
 		});
 
-		assert.match(prepared.prompt, /Diff \(abc123\.\.def456\):/);
+		assert.match(prepared.prompt, /## Diff \(abc123\.\.def456\)/);
 		assert.match(prepared.prompt, /\+const ranged = true;/);
 	});
 });
@@ -277,6 +288,9 @@ test("prepareReviewRequest accepts revision expressions for branch scope", async
 						stderr: "",
 					};
 				}
+				if (args[0] === "log" && args[1] === "--oneline" && args[2] === "abc123^!") {
+					return { code: 0, stdout: "abc1234 single commit\n", stderr: "" };
+				}
 				throw new Error(`unexpected exec args: ${JSON.stringify(args)}`);
 			},
 		};
@@ -285,7 +299,7 @@ test("prepareReviewRequest accepts revision expressions for branch scope", async
 			scope: { kind: "branch", base: "abc123^!" },
 		});
 
-		assert.match(prepared.prompt, /Diff \(abc123\^!\):/);
+		assert.match(prepared.prompt, /## Diff \(abc123\^!\)/);
 		assert.match(prepared.prompt, /\+const singleCommit = true;/);
 	});
 });
@@ -391,11 +405,11 @@ test("prepareReviewRequest builds a complete-codebase review packet for reposito
 			prepared.prompt,
 			/Do not limit the review to recent commits, branch diffs, or the last commit\./,
 		);
-		assert.match(prepared.prompt, /Repository inventory:/);
+		assert.match(prepared.prompt, /## Repository inventory/);
 		assert.match(prepared.prompt, /- Files scanned: 1/);
 		assert.match(prepared.prompt, /- Ignored by \.gitignore: 1/);
 		assert.match(prepared.prompt, /- Skipped unreadable files: 1/);
-		assert.match(prepared.prompt, /Codebase \(repository snapshot\):/);
+		assert.match(prepared.prompt, /## Codebase \(repository snapshot\)/);
 	});
 });
 
@@ -453,9 +467,10 @@ test("prepareReviewRequest surfaces repository snapshot truncation before the co
 			}),
 		);
 
-		const [beforeCodebaseFence] = prepared.prompt.split("Codebase (repository snapshot):\n```text\n");
+		const [beforeCodebaseFence] = prepared.prompt.split("## Codebase (repository snapshot)\n\n```text\n");
 		assert.notEqual(beforeCodebaseFence, prepared.prompt);
-		assert.match(beforeCodebaseFence, /Important: Codebase truncated:/);
+		assert.match(beforeCodebaseFence, /## Truncation notice/);
+		assert.match(beforeCodebaseFence, /Codebase truncated:/);
 		assert.match(beforeCodebaseFence, /Full codebase saved to: .*pi-review-.*\.txt/);
 	});
 });
@@ -480,6 +495,7 @@ test("restoreSelection keeps only known review ids and otherwise defaults to all
 	const defaulted = restoreSelection(reviewTypes, []);
 	assert.deepEqual(Array.from(defaulted).sort(), ["review-correctness", "review-security"]);
 });
+
 
 test("buildReviewOutputPath sanitizes branch names", () => {
 	const outputPath = __test.buildReviewOutputPath("feat/review core");
@@ -525,7 +541,7 @@ test("renderReviewMarkdownToHtml escapes raw html and strips unsafe links", () =
 	assert.match(html, /<a href="https:\/\/example\.com">safe<\/a>/);
 });
 
-test("browser detection requires UI, GUI, and Firefox", async () => {
+test("browser detection requires UI, GUI, and a browser", async () => {
 	let execCalls = 0;
 	const pi = {
 		async exec(command: string, args: string[]) {
@@ -533,7 +549,7 @@ test("browser detection requires UI, GUI, and Firefox", async () => {
 			assert.deepEqual(args, ["--version"]);
 			return command === "/custom/firefox"
 				? { code: 0, stdout: "Mozilla Firefox", stderr: "" }
-				: { code: 1, stdout: "", stderr: "missing" };
+					: { code: 1, stdout: "", stderr: "missing" };
 		},
 	};
 
@@ -573,8 +589,8 @@ test("browser detection requires UI, GUI, and Firefox", async () => {
 	);
 	assert.equal(missing.available, false);
 	if (!missing.available) {
-		assert.equal(missing.reason, "firefox-not-found");
-		assert.deepEqual(missing.triedCommands, ["firefox", "firefox-esr"]);
+		assert.equal(missing.reason, "browser-not-found");
+		assert.deepEqual(missing.triedCommands, ["xdg-open", "firefox", "firefox-esr"]);
 	}
 
 	const available = await __test.detectReviewBrowserAvailability(pi as never, {
@@ -582,18 +598,19 @@ test("browser detection requires UI, GUI, and Firefox", async () => {
 		env: { DISPLAY: ":1", FIREFOX_BIN: "/custom/firefox" },
 		platform: "linux",
 	});
-	assert.deepEqual(available, { available: true, firefoxCommand: "/custom/firefox" });
-	assert.equal(execCalls, 1);
+	assert.deepEqual(available, { available: true, browserCommand: "/custom/firefox" });
+	// xdg-open is probed first and fails; /custom/firefox then succeeds.
+	assert.equal(execCalls, 2);
 });
 
-test("presentReviewMarkdown falls back without writing html when browser is unavailable", async () => {
+test("presentReviewMarkdown reports no-gui without opening a browser", async () => {
 	await withTempDir("review-present-fallback-", async (root) => {
 		const markdownPath = path.join(root, "review.md");
 		await fs.writeFile(markdownPath, "# Review\n", "utf8");
 		let opened = false;
 		const pi = {
 			async exec() {
-				throw new Error("Firefox should not be probed without a GUI");
+				throw new Error("browser should not be probed without a GUI");
 			},
 		};
 
@@ -610,6 +627,7 @@ test("presentReviewMarkdown falls back without writing html when browser is unav
 		assert.equal(result.presented, false);
 		if (!result.presented) assert.equal(result.reason, "no-gui");
 		assert.equal(opened, false);
+		// Browser path returns before writing HTML when no GUI is available.
 		await assert.rejects(() => fs.stat(path.join(root, "review.html")), /ENOENT/);
 	});
 });
@@ -643,16 +661,16 @@ test("presentReviewMarkdown reports open failures after writing html", async () 
 	});
 });
 
-test("presentReviewMarkdown writes html and opens Firefox when available", async () => {
+test("presentReviewMarkdown writes html and opens a browser", async () => {
 	await withTempDir("review-present-success-", async (root) => {
 		const markdownPath = path.join(root, "review.md");
 		await fs.writeFile(markdownPath, "# Review\n\nLooks good.", "utf8");
 		let opened: { command: string; htmlPath: string } | undefined;
 		const pi = {
 			async exec(command: string, args: string[]) {
-				assert.equal(command, "firefox");
+				assert.equal(command, "xdg-open");
 				assert.deepEqual(args, ["--version"]);
-				return { code: 0, stdout: "Mozilla Firefox", stderr: "" };
+				return { code: 0, stdout: "xdg-open", stderr: "" };
 			},
 		};
 
@@ -668,9 +686,12 @@ test("presentReviewMarkdown writes html and opens Firefox when available", async
 		});
 
 		assert.equal(result.presented, true);
-		assert.equal(opened?.command, "firefox");
+		assert.equal(opened?.command, "xdg-open");
 		assert.equal(opened?.htmlPath, path.join(root, "review.html"));
 		const html = await fs.readFile(path.join(root, "review.html"), "utf8");
 		assert.match(html, /<h1>Review<\/h1>/);
 	});
 });
+
+
+
